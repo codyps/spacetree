@@ -1,0 +1,486 @@
+import AppKit
+import CoreServices
+import Observation
+import SwiftUI
+
+@MainActor
+@Observable
+final class ScanTarget: Identifiable {
+    enum Kind: Equatable {
+        case apfsContainer(volumeCount: Int, isInternal: Bool, isRemovable: Bool, isReadOnly: Bool)
+        case volume(format: String, isInternal: Bool, isRemovable: Bool, isReadOnly: Bool)
+        case folder
+    }
+
+    enum State: Equatable {
+        case idle
+        case scanning
+        case complete
+        case failed(String)
+    }
+
+    let id: String
+    var url: URL
+    var roots: [ScanRoot]
+    var name: String
+    var kind: Kind
+    var totalCapacity: Int64?
+    var availableCapacity: Int64?
+    var isAvailable: Bool
+    var isAuxiliary: Bool
+    let persistResults: Bool
+    var state: State = .idle
+    var progress: ScanProgress
+    var root: FileNode?
+    var current: FileNode?
+    var selected: FileNode?
+    var searchText = ""
+    var scannedAt: Date?
+    var scanDuration: TimeInterval?
+    var hasFilesystemChanges = false
+    var changedPathCount = 0
+    var changeTrackingAvailable = false
+    @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var changeMonitor: FilesystemChangeMonitor?
+    @ObservationIgnored private var changedPaths: Set<String> = []
+    @ObservationIgnored private var requiresFullRescan = false
+
+    init(
+        id: String,
+        url: URL,
+        name: String,
+        kind: Kind,
+        roots: [ScanRoot]? = nil,
+        totalCapacity: Int64? = nil,
+        availableCapacity: Int64? = nil,
+        isAvailable: Bool = true,
+        isAuxiliary: Bool = false,
+        persistResults: Bool = true
+    ) {
+        self.id = id
+        self.url = url
+        self.roots = roots ?? [ScanRoot(url: url, name: name)]
+        self.name = name
+        self.kind = kind
+        self.totalCapacity = totalCapacity
+        self.availableCapacity = availableCapacity
+        self.isAvailable = isAvailable
+        self.isAuxiliary = isAuxiliary
+        self.persistResults = persistResults
+        self.progress = ScanProgress(currentPath: url.path, itemCount: 0, bytesFound: 0, unreadableCount: 0)
+    }
+
+    var isVolume: Bool {
+        switch kind {
+        case .apfsContainer, .volume: return true
+        case .folder: return false
+        }
+    }
+
+    var kindDescription: String {
+        switch kind {
+        case .folder: return "Folder"
+        case .apfsContainer(let volumeCount, let isInternal, let isRemovable, let isReadOnly):
+            var parts = ["APFS container", "\(volumeCount) mounted \(volumeCount == 1 ? "volume" : "volumes")"]
+            parts.append(isInternal ? "Internal" : (isRemovable ? "Removable" : "External"))
+            if isReadOnly { parts.append("Read only") }
+            return parts.joined(separator: " · ")
+        case .volume(let format, let isInternal, let isRemovable, let isReadOnly):
+            var parts = [format]
+            parts.append(isInternal ? "Internal" : (isRemovable ? "Removable" : "External"))
+            if isReadOnly { parts.append("Read only") }
+            return parts.joined(separator: " · ")
+        }
+    }
+
+    var visibleChildren: [FileNode] {
+        guard let current else { return [] }
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return current.children }
+        return current.children.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    var breadcrumbs: [FileNode] {
+        guard let root, let current else { return [] }
+        if root.id == current.id { return [root] }
+        var result = [root]
+        var node = root
+        let targetPath = current.url.standardizedFileURL.path
+        while node.id != current.id,
+              let next = node.children.first(where: {
+                  $0.isDirectory && (targetPath == $0.url.path || targetPath.hasPrefix($0.url.path + "/"))
+              }) {
+            result.append(next)
+            node = next
+        }
+        return result
+    }
+
+    func scan() {
+        task?.cancel()
+        changeMonitor?.stop()
+        changeMonitor = nil
+        changeTrackingAvailable = false
+        generation = UUID()
+        let thisGeneration = generation
+        let scanStartedAt = Date()
+        let startingEventID = UInt64(FSEventsGetCurrentEventId())
+        root = nil
+        current = nil
+        selected = nil
+        searchText = ""
+        hasFilesystemChanges = false
+        changedPathCount = 0
+        changedPaths.removeAll()
+        requiresFullRescan = false
+        progress = ScanProgress(currentPath: url.path, itemCount: 0, bytesFound: 0, unreadableCount: 0)
+        state = .scanning
+
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await DiskScanner.scan(
+                    roots: roots,
+                    displayName: name,
+                    identifier: id
+                ) { [weak self] update in
+                    await MainActor.run {
+                        guard let self, self.generation == thisGeneration else { return }
+                        self.progress = update
+                    }
+                }
+                guard !Task.isCancelled, generation == thisGeneration else { return }
+                finishScan(result, startedAt: scanStartedAt, eventID: startingEventID)
+            } catch is CancellationError {
+                guard generation == thisGeneration else { return }
+                state = .idle
+                task = nil
+            } catch {
+                guard generation == thisGeneration else { return }
+                state = .failed(error.localizedDescription)
+                task = nil
+            }
+        }
+    }
+
+    func cancel() {
+        guard state == .scanning else { return }
+        generation = UUID()
+        task?.cancel()
+        task = nil
+        if root == nil {
+            state = .idle
+        } else {
+            state = .complete
+            startChangeTracking(since: UInt64(FSEventsGetCurrentEventId()))
+        }
+    }
+
+    func rescan() {
+        if state == .complete, changeTrackingAvailable, !hasFilesystemChanges {
+            scannedAt = Date()
+            return
+        }
+        if state == .complete,
+           changeTrackingAvailable,
+           hasFilesystemChanges,
+           !requiresFullRescan,
+           !changedPaths.isEmpty,
+           changedPaths.count <= 128,
+           root?.duplicateReferenceCount == 0 {
+            incrementalScan()
+            return
+        }
+        scan()
+    }
+
+    func restoreSnapshot() {
+        guard persistResults else { return }
+        let expectedGeneration = generation
+        Task { [weak self] in
+            guard let self, let snapshot = await SnapshotStore.load(targetID: id) else { return }
+            guard generation == expectedGeneration, state == .idle, root == nil else { return }
+            root = snapshot.root
+            current = snapshot.root
+            progress = snapshot.progress
+            scannedAt = snapshot.scannedAt
+            scanDuration = snapshot.scanDuration
+            state = .complete
+            startChangeTracking(since: snapshot.fseventID)
+        }
+    }
+
+    func open(_ node: FileNode) {
+        if node.isDirectory {
+            current = node
+            selected = nil
+            searchText = ""
+        } else {
+            selected = node
+        }
+    }
+
+    func revealSelected() {
+        guard let selected else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([selected.url])
+    }
+
+    private func startChangeTracking(since eventID: UInt64) {
+        changeMonitor?.stop()
+        let monitor = FilesystemChangeMonitor(paths: roots.map(\.url.path), since: eventID) { [weak self] change in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.hasFilesystemChanges = true
+                self.changedPathCount += max(1, change.paths.count)
+                self.changedPaths.formUnion(change.paths)
+                self.requiresFullRescan = self.requiresFullRescan || change.requiresFullScan
+            }
+        }
+        changeMonitor = monitor
+        changeTrackingAvailable = monitor.isRunning
+    }
+
+    private func incrementalScan() {
+        guard let existingRoot = root else { scan(); return }
+        task?.cancel()
+        changeMonitor?.stop()
+        changeMonitor = nil
+        changeTrackingAvailable = false
+        generation = UUID()
+        let thisGeneration = generation
+        let scanStartedAt = Date()
+        let startingEventID = UInt64(FSEventsGetCurrentEventId())
+        let paths = Array(changedPaths)
+        state = .scanning
+        progress = ScanProgress(currentPath: paths.first ?? url.path, itemCount: 0, bytesFound: 0, unreadableCount: 0)
+
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await DiskScanner.refresh(
+                    root: existingRoot,
+                    changedPaths: paths,
+                    scanRoots: roots
+                ) { [weak self] update in
+                    await MainActor.run {
+                        guard let self, self.generation == thisGeneration else { return }
+                        self.progress = update
+                    }
+                }
+                guard !Task.isCancelled, generation == thisGeneration else { return }
+                finishScan(result, startedAt: scanStartedAt, eventID: startingEventID)
+            } catch is CancellationError {
+                guard generation == thisGeneration else { return }
+                state = .complete
+                task = nil
+            } catch {
+                guard generation == thisGeneration else { return }
+                state = .failed(error.localizedDescription)
+                task = nil
+            }
+        }
+    }
+
+    private func finishScan(_ result: FileNode, startedAt: Date, eventID: UInt64) {
+        root = result
+        current = result
+        selected = nil
+        scannedAt = Date()
+        scanDuration = Date().timeIntervalSince(startedAt)
+        progress = ScanProgress(
+            currentPath: name,
+            itemCount: result.fileCount + result.directoryCount,
+            bytesFound: result.size,
+            unreadableCount: progress.unreadableCount,
+            duplicateReferenceCount: result.duplicateReferenceCount
+        )
+        hasFilesystemChanges = false
+        changedPathCount = 0
+        changedPaths.removeAll()
+        requiresFullRescan = false
+        state = .complete
+        task = nil
+        startChangeTracking(since: eventID)
+        let snapshot = ScanSnapshot(
+            version: ScanSnapshot.currentVersion,
+            targetID: id,
+            root: result,
+            progress: progress,
+            scannedAt: scannedAt ?? Date(),
+            scanDuration: scanDuration ?? 0,
+            fseventID: eventID
+        )
+        if persistResults { Task { await SnapshotStore.save(snapshot) } }
+    }
+}
+
+@MainActor
+@Observable
+final class AppModel {
+    var targets: [ScanTarget] = []
+    var viewingTargetID: String?
+    var showAuxiliaryMounts = false
+
+    init() {
+        refreshMountedItems()
+        restoreSavedFolders()
+    }
+
+    var viewingTarget: ScanTarget? {
+        guard let viewingTargetID else { return nil }
+        return targets.first { $0.id == viewingTargetID }
+    }
+
+    var scanningCount: Int { targets.count { $0.state == .scanning } }
+    var visibleTargets: [ScanTarget] { targets.filter { showAuxiliaryMounts || !$0.isAuxiliary } }
+    var hiddenAuxiliaryCount: Int { targets.count { $0.isAuxiliary } }
+
+    func refreshMountedItems() {
+        for target in targets where target.isVolume { target.isAvailable = false }
+
+        let grouped = Dictionary(grouping: MountDiscovery.mountedFilesystems()) { mount in
+            mount.apfsContainerUUID.map { "apfs:\($0)" } ?? "mount:\(mount.url.path)"
+        }
+
+        for (id, mounts) in grouped {
+            let ordered = mounts.sorted {
+                if $0.url.path == "/" { return true }
+                if $1.url.path == "/" { return false }
+                return $0.url.path.count < $1.url.path.count
+            }
+            guard let primary = ordered.first else { continue }
+            let isAPFSContainer = primary.apfsContainerUUID != nil
+            let name: String
+            if isAPFSContainer, primary.url.path == "/" {
+                name = "\(primary.name) APFS Container"
+            } else if isAPFSContainer, ordered.count > 1 {
+                name = "\(primary.name) APFS Container"
+            } else {
+                name = primary.name
+            }
+            let kind: ScanTarget.Kind = isAPFSContainer
+                ? .apfsContainer(
+                    volumeCount: ordered.count,
+                    isInternal: primary.isInternal,
+                    isRemovable: primary.isRemovable,
+                    isReadOnly: ordered.allSatisfy(\.isReadOnly)
+                )
+                : .volume(
+                    format: primary.format,
+                    isInternal: primary.isInternal,
+                    isRemovable: primary.isRemovable,
+                    isReadOnly: primary.isReadOnly
+                )
+            let roots = ordered.map { ScanRoot(url: $0.url, name: $0.name) }
+            if let existing = targets.first(where: { $0.id == id }) {
+                existing.name = name
+                existing.kind = kind
+                existing.url = primary.url
+                existing.roots = roots
+                existing.totalCapacity = primary.totalCapacity
+                existing.availableCapacity = primary.availableCapacity
+                existing.isAvailable = true
+                existing.isAuxiliary = ordered.allSatisfy(\.isAuxiliary)
+            } else {
+                let target = ScanTarget(
+                    id: id,
+                    url: primary.url,
+                    name: name,
+                    kind: kind,
+                    roots: roots,
+                    totalCapacity: primary.totalCapacity,
+                    availableCapacity: primary.availableCapacity,
+                    isAuxiliary: ordered.allSatisfy(\.isAuxiliary)
+                )
+                targets.append(target)
+                target.restoreSnapshot()
+            }
+        }
+        sortTargets()
+    }
+
+    func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Add a folder to SpaceTree"
+        panel.prompt = "Add and Scan"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+        addFolderAndScan(selectedURL)
+    }
+
+    func scanHome() {
+        addFolderAndScan(FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    func addFolderAndScan(_ url: URL) {
+        let standardized = url.standardizedFileURL
+        let id = "folder:\(standardized.path)"
+        let target: ScanTarget
+        if let existing = targets.first(where: { $0.id == id }) {
+            target = existing
+            target.isAvailable = true
+        } else {
+            target = ScanTarget(
+                id: id,
+                url: standardized,
+                name: standardized.lastPathComponent.isEmpty ? standardized.path : standardized.lastPathComponent,
+                kind: .folder
+            )
+            targets.append(target)
+            saveFolderTargets()
+            sortTargets()
+        }
+        target.scan()
+    }
+
+    func scanAll() {
+        for target in visibleTargets where target.isAvailable { target.scan() }
+    }
+
+    func cancelAll() {
+        for target in targets { target.cancel() }
+    }
+
+    func show(_ target: ScanTarget) {
+        guard target.root != nil else { return }
+        viewingTargetID = target.id
+    }
+
+    func showDashboard() {
+        viewingTargetID = nil
+    }
+
+    private func sortTargets() {
+        targets.sort { lhs, rhs in
+            if lhs.isVolume != rhs.isVolume { return lhs.isVolume && !rhs.isVolume }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    private func restoreSavedFolders() {
+        for path in UserDefaults.standard.stringArray(forKey: "SpaceTree.folderTargets") ?? [] {
+            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            let id = "folder:\(url.path)"
+            guard !targets.contains(where: { $0.id == id }) else { continue }
+            let target = ScanTarget(
+                id: id,
+                url: url,
+                name: url.lastPathComponent.isEmpty ? url.path : url.lastPathComponent,
+                kind: .folder,
+                isAvailable: FileManager.default.fileExists(atPath: url.path)
+            )
+            targets.append(target)
+            target.restoreSnapshot()
+        }
+        sortTargets()
+    }
+
+    private func saveFolderTargets() {
+        let paths = targets.filter { !$0.isVolume }.map(\.url.path)
+        UserDefaults.standard.set(paths, forKey: "SpaceTree.folderTargets")
+    }
+}
