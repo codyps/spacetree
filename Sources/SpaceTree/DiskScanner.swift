@@ -15,71 +15,58 @@ struct ScanRoot: Codable, Equatable, Sendable {
     let name: String
 }
 
-enum DiskScanner {
-    private struct FileIdentity: Hashable, Sendable {
-        let device: UInt64
-        let inode: UInt64
-    }
+enum DiskScannerError: LocalizedError {
+    case rootIsSymbolicLink(URL)
+    case rootIsNotDirectory(URL)
+    case rootCannotBeRead(URL, Int32)
+    case tooManyEntries
 
+    var errorDescription: String? {
+        switch self {
+        case .rootIsSymbolicLink(let url): return "SpaceTree will not scan the symbolic-link root at \(url.path)."
+        case .rootIsNotDirectory(let url): return "The scan root is not a directory: \(url.path)"
+        case .rootCannotBeRead(let url, let error): return "The scan root cannot be read: \(url.path) (errno \(error))"
+        case .tooManyEntries: return "The scan contains more entries than the compact tree can address."
+        }
+    }
+}
+
+enum DiskScanner {
     private enum EntryKind: Sendable {
         case file
         case directory
         case symlink
         case other
+
+        var nodeKind: NodeKind {
+            switch self {
+            case .file: .file
+            case .directory: .directory
+            case .symlink: .symlink
+            case .other: .other
+            }
+        }
     }
 
     private struct EntryMetadata: Sendable {
-        let url: URL
         let name: String
         let kind: EntryKind
         let size: Int64
         let logicalSize: Int64
         let modifiedAt: Date?
         let identity: FileIdentity?
-        var isDuplicate = false
     }
 
     private struct DirectoryWork: Sendable {
         let url: URL
-        let modifiedAt: Date?
+        let nodeID: NodeID
+        let rootDevice: UInt64?
     }
 
     private struct DirectoryBatch: Sendable {
-        let url: URL
-        let modifiedAt: Date?
-        var entries: [EntryMetadata]
-        let unreadableCount: Int
-    }
-
-    private final class IdentityRegistry: @unchecked Sendable {
-        private var identities: Set<FileIdentity> = []
-        private let lock = NSLock()
-
-        func claim(_ identity: FileIdentity) -> Bool {
-            lock.lock()
-            defer { lock.unlock() }
-            return identities.insert(identity).inserted
-        }
-    }
-
-    private actor ContainerProgress {
-        private var updates: [Int: ScanProgress] = [:]
-        private let callback: @Sendable (ScanProgress) async -> Void
-
-        init(callback: @escaping @Sendable (ScanProgress) async -> Void) {
-            self.callback = callback
-        }
-
-        func update(rootIndex: Int, rootName: String, progress: ScanProgress) async {
-            updates[rootIndex] = progress
-            await callback(ScanProgress(
-                currentPath: "\(rootName): \(progress.currentPath)",
-                itemCount: updates.values.reduce(0) { $0 + $1.itemCount },
-                bytesFound: updates.values.reduce(0) { $0 + $1.bytesFound },
-                unreadableCount: updates.values.reduce(0) { $0 + $1.unreadableCount },
-                duplicateReferenceCount: updates.values.reduce(0) { $0 + $1.duplicateReferenceCount }
-            ))
-        }
+        let work: DirectoryWork
+        let entries: [EntryMetadata]
+        let unreadable: Bool
     }
 
     private actor EnumerationLimiter {
@@ -109,39 +96,34 @@ enum DiskScanner {
         permits: min(8, max(4, ProcessInfo.processInfo.activeProcessorCount))
     )
 
-    private static let fallbackKeys: Set<URLResourceKey> = [
-        .isDirectoryKey,
-        .isRegularFileKey,
-        .isSymbolicLinkKey,
-        .fileSizeKey,
-        .totalFileAllocatedSizeKey,
-        .contentModificationDateKey,
-        .fileResourceIdentifierKey,
-        .volumeIdentifierKey
-    ]
-
     static var directoryWorkerCount: Int {
-        min(4, max(2, ProcessInfo.processInfo.activeProcessorCount / 2))
+        min(8, max(4, ProcessInfo.processInfo.activeProcessorCount / 2))
     }
 
     static func scan(
         url: URL,
         progress: @escaping @Sendable (ScanProgress) async -> Void
-    ) async throws -> FileNode {
-        try await scan(url: url, identities: IdentityRegistry(), progress: progress)
+    ) async throws -> ScanTree {
+        let root = url.standardizedFileURL
+        let name = root.lastPathComponent.isEmpty ? root.path : root.lastPathComponent
+        return try await scan(
+            roots: [ScanRoot(url: root, name: name)],
+            displayName: name,
+            identifier: root.path,
+            progress: progress
+        )
     }
 
     static func refresh(
-        root existingRoot: FileNode,
+        root existingRoot: ScanTree,
         changedPaths: [String],
         scanRoots: [ScanRoot],
         progress: @escaping @Sendable (ScanProgress) async -> Void
-    ) async throws -> FileNode {
+    ) async throws -> ScanTree {
+        guard !changedPaths.isEmpty else { return existingRoot }
         let rootPaths = scanRoots.map { $0.url.standardizedFileURL.path }
         let candidates = changedPaths.compactMap { changedPath -> String? in
             let url = URL(fileURLWithPath: changedPath).standardizedFileURL
-            // FSEvents reports the changed entry. Refresh its parent so additions,
-            // deletions, and renames can change the parent's child list correctly.
             let directory = rootPaths.contains(url.path) ? url.path : url.deletingLastPathComponent().path
             return rootPaths.contains(where: { directory == $0 || directory.hasPrefix($0 + "/") }) ? directory : nil
         }
@@ -152,25 +134,21 @@ enum DiskScanner {
         }
         guard !coalesced.isEmpty else { return existingRoot }
 
-        let aggregate = ContainerProgress(callback: progress)
-        let replacements = try await withThrowingTaskGroup(of: (String, FileNode).self) { group in
-            for (index, path) in coalesced.enumerated() {
-                group.addTask {
-                    let url = URL(fileURLWithPath: path, isDirectory: true)
-                    let result = try await scan(url: url, identities: IdentityRegistry()) { update in
-                        await aggregate.update(rootIndex: index, rootName: url.lastPathComponent, progress: update)
-                    }
-                    return (path, result)
-                }
+        var replacements: [String: ScanTree] = [:]
+        for path in coalesced {
+            let replacement = try await scan(url: URL(fileURLWithPath: path, isDirectory: true), progress: progress)
+            if replacement.hardLinkReferenceCount > 0 {
+                let name = existingRoot.metadata(for: existingRoot.rootID).name
+                return try await scan(
+                    roots: scanRoots,
+                    displayName: name,
+                    identifier: existingRoot.displayURL.absoluteString,
+                    progress: progress
+                )
             }
-            var values: [(String, FileNode)] = []
-            for try await value in group { values.append(value) }
-            return values
+            replacements[path] = replacement
         }
-
-        return replacements.reduce(existingRoot) { tree, replacement in
-            replacingDirectory(in: tree, path: replacement.0, with: replacement.1)
-        }
+        return try rebuild(existingRoot, replacing: replacements)
     }
 
     static func scan(
@@ -178,55 +156,40 @@ enum DiskScanner {
         displayName: String,
         identifier: String,
         progress: @escaping @Sendable (ScanProgress) async -> Void
-    ) async throws -> FileNode {
+    ) async throws -> ScanTree {
         guard !roots.isEmpty else { throw CocoaError(.fileReadNoSuchFile) }
-        if roots.count == 1, let root = roots.first {
-            return try await scan(url: root.url, progress: progress)
-        }
-
-        let aggregate = ContainerProgress(callback: progress)
-        let scannedRoots = try await withThrowingTaskGroup(of: (Int, FileNode).self) { group in
-            for (index, root) in roots.enumerated() {
-                group.addTask {
-                    let node = try await scan(url: root.url, identities: IdentityRegistry()) { update in
-                        await aggregate.update(rootIndex: index, rootName: root.name, progress: update)
-                    }
-                    return (index, node)
-                }
-            }
-            var results: [(Int, FileNode)] = []
-            for try await result in group { results.append(result) }
-            return results.sorted { $0.0 < $1.0 }
-        }
-
-        let children = zip(roots, scannedRoots.map(\.1)).map { root, scanned in
-            FileNode.directory(
-                url: root.url,
-                name: root.name,
-                children: scanned.children,
-                modifiedAt: scanned.modifiedAt
-            )
+        let standardizedRoots = roots.map { ScanRoot(url: $0.url.standardizedFileURL, name: $0.name) }
+        let rootStats = try standardizedRoots.map { root in
+            (root, try rootMetadata(at: root.url))
         }
         let safeIdentifier = identifier.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? UUID().uuidString
-        return FileNode.directory(
-            url: URL(string: "spacetree://mount-group/\(safeIdentifier)")!,
-            name: displayName,
-            children: children
-        )
-    }
+        let displayURL = standardizedRoots.count == 1
+            ? standardizedRoots[0].url
+            : URL(string: "spacetree://mount-group/\(safeIdentifier)")!
 
-    private static func scan(
-        url: URL,
-        identities: IdentityRegistry,
-        progress: @escaping @Sendable (ScanProgress) async -> Void
-    ) async throws -> FileNode {
-        let root = url.standardizedFileURL
         return try await Task.detached(priority: .userInitiated) {
-            let rootDevice = deviceIdentifier(at: root)
-            let rootModifiedAt = try? root.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-            var pending = [DirectoryWork(url: root, modifiedAt: rootModifiedAt)]
-            var batches: [String: DirectoryBatch] = [:]
-            var state = ScanProgress(currentPath: root.path, itemCount: 0, bytesFound: 0, unreadableCount: 0)
+            var builder = ScanTreeBuilder(
+                rootName: standardizedRoots.count == 1
+                    ? (standardizedRoots[0].url.lastPathComponent.isEmpty ? standardizedRoots[0].url.path : standardizedRoots[0].url.lastPathComponent)
+                    : displayName,
+                rootURL: displayURL,
+                synthetic: standardizedRoots.count > 1
+            )
+            var pending: [DirectoryWork] = []
+            for (root, metadata) in rootStats {
+                let nodeID = standardizedRoots.count == 1
+                    ? builder.rootID
+                    : builder.addPhysicalRoot(name: root.name, url: root.url, parent: builder.rootID)
+                pending.append(DirectoryWork(url: root.url, nodeID: nodeID, rootDevice: metadata.device))
+            }
+
+            var seenIdentities = Set<FileIdentity>()
+            var state = ScanProgress(
+                currentPath: standardizedRoots[0].url.path,
+                itemCount: pending.count,
+                bytesFound: 0,
+                unreadableCount: 0
+            )
             var lastUpdate = ContinuousClock.now
 
             try await withThrowingTaskGroup(of: DirectoryBatch.self) { group in
@@ -238,7 +201,7 @@ enum DiskScanner {
                         group.addTask {
                             try Task.checkCancellation()
                             await enumerationLimiter.acquire()
-                            let result = enumerate(work, rootDevice: rootDevice)
+                            let result = enumerate(work)
                             await enumerationLimiter.release()
                             return result
                         }
@@ -248,25 +211,40 @@ enum DiskScanner {
                 submitAvailableWork()
                 while activeWorkers > 0 {
                     try Task.checkCancellation()
-                    guard var batch = try await group.next() else { break }
+                    guard let batch = try await group.next() else { break }
                     activeWorkers -= 1
+                    if batch.unreadable {
+                        builder.markUnreadable(batch.work.nodeID)
+                        state.unreadableCount += 1
+                    }
 
-                    for index in batch.entries.indices where batch.entries[index].kind == .file {
-                        if let identity = batch.entries[index].identity,
-                           !identities.claim(identity) {
-                            batch.entries[index].isDuplicate = true
-                            state.duplicateReferenceCount += 1
-                        } else {
-                            state.bytesFound += batch.entries[index].size
+                    for entry in batch.entries {
+                        guard builder.nodes.count < Int(UInt32.max) else { throw DiskScannerError.tooManyEntries }
+                        let nodeID = builder.addNode(
+                            parent: batch.work.nodeID,
+                            name: entry.name,
+                            kind: entry.kind.nodeKind,
+                            allocatedBytes: entry.kind == .symlink ? 0 : entry.size,
+                            logicalBytes: entry.kind == .symlink ? 0 : entry.logicalSize,
+                            modifiedAt: entry.modifiedAt,
+                            identity: entry.identity
+                        )
+                        if entry.kind == .directory {
+                            pending.append(DirectoryWork(
+                                url: batch.work.url.appendingPathComponent(entry.name, isDirectory: true),
+                                nodeID: nodeID,
+                                rootDevice: batch.work.rootDevice
+                            ))
+                        } else if entry.kind == .file {
+                            if let identity = entry.identity, !seenIdentities.insert(identity).inserted {
+                                state.duplicateReferenceCount += 1
+                            } else {
+                                state.bytesFound = saturatingProgressAdd(state.bytesFound, entry.size)
+                            }
                         }
                     }
-                    for entry in batch.entries where entry.kind == .directory {
-                        pending.append(DirectoryWork(url: entry.url, modifiedAt: entry.modifiedAt))
-                    }
-                    state.itemCount += batch.entries.count + 1
-                    state.unreadableCount += batch.unreadableCount
-                    state.currentPath = batch.url.path
-                    batches[batch.url.path] = batch
+                    state.itemCount += batch.entries.count
+                    state.currentPath = batch.work.url.path
 
                     let now = ContinuousClock.now
                     if lastUpdate.duration(to: now) >= .milliseconds(120) {
@@ -277,44 +255,22 @@ enum DiskScanner {
                 }
             }
 
-            func buildDirectory(_ work: DirectoryWork) -> FileNode {
-                // Consume each flat batch as it is materialized into the final tree so a
-                // large scan does not retain two complete copies of its metadata.
-                guard let batch = batches.removeValue(forKey: work.url.path) else {
-                    return FileNode.directory(url: work.url, children: [], modifiedAt: work.modifiedAt)
-                }
-                let children = batch.entries.compactMap { entry -> FileNode? in
-                    switch entry.kind {
-                    case .directory:
-                        return buildDirectory(DirectoryWork(url: entry.url, modifiedAt: entry.modifiedAt))
-                    case .file:
-                        return FileNode.file(
-                            url: entry.url,
-                            size: entry.isDuplicate ? 0 : entry.size,
-                            logicalSize: entry.isDuplicate ? 0 : entry.logicalSize,
-                            modifiedAt: entry.modifiedAt,
-                            isDuplicateReference: entry.isDuplicate
-                        )
-                    case .symlink:
-                        return FileNode.file(url: entry.url, size: 0, logicalSize: 0, modifiedAt: entry.modifiedAt)
-                    case .other:
-                        return nil
-                    }
-                }
-                return FileNode.directory(url: work.url, children: children, modifiedAt: batch.modifiedAt)
-            }
-
-            let result = buildDirectory(DirectoryWork(url: root, modifiedAt: rootModifiedAt))
+            let tree = try builder.finalize()
+            let root = tree.metadata(for: tree.rootID)
+            state.itemCount = root.fileCount + root.directoryCount
+            state.bytesFound = root.allocatedBytes
+            state.duplicateReferenceCount = root.duplicateReferenceCount
+            state.unreadableCount = tree.unreadableCount
             await progress(state)
-            return result
+            return tree
         }.value
     }
 
-    private static func enumerate(_ work: DirectoryWork, rootDevice: UInt64?) -> DirectoryBatch {
-        if let entries = bulkEntries(at: work.url, rootDevice: rootDevice) {
-            return DirectoryBatch(url: work.url, modifiedAt: work.modifiedAt, entries: entries, unreadableCount: 0)
+    private static func enumerate(_ work: DirectoryWork) -> DirectoryBatch {
+        if let entries = bulkEntries(at: work.url, rootDevice: work.rootDevice) {
+            return DirectoryBatch(work: work, entries: entries, unreadable: false)
         }
-        return fallbackEntries(at: work, rootDevice: rootDevice)
+        return DirectoryBatch(work: work, entries: [], unreadable: true)
     }
 
     private static func bulkEntries(at directory: URL, rootDevice: UInt64?) -> [EntryMetadata]? {
@@ -335,97 +291,111 @@ enum DiskScanner {
             let name = String(cString: namePointer)
             guard name != ".", name != ".." else { continue }
             if let rootDevice, record.device_id != 0, record.device_id != rootDevice { continue }
-            let kind: EntryKind
-            switch record.kind {
-            case ST_ENTRY_FILE: kind = .file
-            case ST_ENTRY_DIRECTORY: kind = .directory
-            case ST_ENTRY_SYMLINK: kind = .symlink
-            default: kind = .other
+            let kind: EntryKind = switch record.kind {
+            case ST_ENTRY_FILE: .file
+            case ST_ENTRY_DIRECTORY: .directory
+            case ST_ENTRY_SYMLINK: .symlink
+            default: .other
             }
             let modifiedAt = record.modified_seconds == 0
                 ? nil
                 : Date(timeIntervalSince1970: TimeInterval(record.modified_seconds) + TimeInterval(record.modified_nanoseconds) / 1_000_000_000)
             results.append(EntryMetadata(
-                url: directory.appendingPathComponent(name, isDirectory: kind == .directory),
                 name: name,
                 kind: kind,
                 size: max(0, record.allocated_size),
                 logicalSize: max(0, record.logical_size),
                 modifiedAt: modifiedAt,
-                identity: record.file_id == 0 ? nil : FileIdentity(device: record.device_id, inode: record.file_id)
+                identity: kind == .file && record.file_id != 0 && record.link_count > 1
+                    ? FileIdentity(device: record.device_id, inode: record.file_id)
+                    : nil
             ))
         }
         return results
     }
 
-    private static func fallbackEntries(at work: DirectoryWork, rootDevice: UInt64?) -> DirectoryBatch {
-        do {
-            let urls = try FileManager.default.contentsOfDirectory(
-                at: work.url,
-                includingPropertiesForKeys: Array(fallbackKeys),
-                options: []
-            )
-            let entries = urls.compactMap { url -> EntryMetadata? in
-                guard let values = try? url.resourceValues(forKeys: fallbackKeys) else { return nil }
-                let kind: EntryKind
-                if values.isSymbolicLink == true { kind = .symlink }
-                else if values.isDirectory == true { kind = .directory }
-                else if values.isRegularFile == true { kind = .file }
-                else { kind = .other }
-                let identifierHash = (values.fileResourceIdentifier as? NSObject)?.hash
-                let identity = identifierHash.map {
-                    FileIdentity(device: rootDevice ?? 0, inode: UInt64(bitPattern: Int64($0)))
-                }
-                return EntryMetadata(
-                    url: url,
-                    name: url.lastPathComponent,
-                    kind: kind,
-                    size: Int64(values.totalFileAllocatedSize ?? values.fileSize ?? 0),
-                    logicalSize: Int64(values.fileSize ?? 0),
-                    modifiedAt: values.contentModificationDate,
-                    identity: identity
-                )
-            }
-            return DirectoryBatch(url: work.url, modifiedAt: work.modifiedAt, entries: entries, unreadableCount: 0)
-        } catch {
-            return DirectoryBatch(url: work.url, modifiedAt: work.modifiedAt, entries: [], unreadableCount: 1)
-        }
-    }
-
-    private static func deviceIdentifier(at url: URL) -> UInt64? {
+    private static func rootMetadata(at url: URL) throws -> (device: UInt64, inode: UInt64) {
         var metadata = stat()
         let result = url.withUnsafeFileSystemRepresentation { path in
-            guard let path else { return Int32(-1) }
+            guard let path else { return Int32(EINVAL) }
             return lstat(path, &metadata)
         }
-        return result == 0 ? UInt64(metadata.st_dev) : nil
+        guard result == 0 else { throw DiskScannerError.rootCannotBeRead(url, errno) }
+        if (metadata.st_mode & S_IFMT) == S_IFLNK { throw DiskScannerError.rootIsSymbolicLink(url) }
+        guard (metadata.st_mode & S_IFMT) == S_IFDIR else { throw DiskScannerError.rootIsNotDirectory(url) }
+        return (UInt64(metadata.st_dev), UInt64(metadata.st_ino))
     }
 
-    private static func replacingDirectory(in node: FileNode, path: String, with replacement: FileNode) -> FileNode {
-        if node.url.standardizedFileURL.path == path {
-            return FileNode.directory(
-                url: replacement.url,
-                name: node.name,
-                children: replacement.children,
-                modifiedAt: replacement.modifiedAt
-            )
-        }
-        guard node.isDirectory else { return node }
-        var changed = false
-        let children = node.children.map { child -> FileNode in
-            let childPath = child.url.standardizedFileURL.path
-            let mayContainPath = path == childPath || path.hasPrefix(childPath + "/")
-            guard mayContainPath else { return child }
-            let updated = replacingDirectory(in: child, path: path, with: replacement)
-            if updated != child { changed = true }
-            return updated
-        }
-        guard changed else { return node }
-        return FileNode.directory(
-            url: node.url,
-            name: node.name,
-            children: children,
-            modifiedAt: node.modifiedAt
+    private static func rebuild(_ existing: ScanTree, replacing replacements: [String: ScanTree]) throws -> ScanTree {
+        let rootMetadata = existing.metadata(for: existing.rootID)
+        let synthetic = existing.kind(of: existing.rootID) == .syntheticRoot
+        var builder = ScanTreeBuilder(
+            rootName: rootMetadata.name,
+            rootURL: existing.displayURL,
+            synthetic: synthetic
         )
+
+        func copyContents(
+            from source: ScanTree,
+            sourceParent: NodeID,
+            to destinationParent: NodeID,
+            builder: inout ScanTreeBuilder
+        ) {
+            for child in source.children(of: sourceParent) {
+                let metadata = source.metadata(for: child)
+                if metadata.isDirectory, let replacement = replacements[metadata.url.standardizedFileURL.path] {
+                    let destination = builder.addNode(
+                        parent: destinationParent,
+                        name: metadata.name,
+                        kind: metadata.kind,
+                        allocatedBytes: 0,
+                        logicalBytes: 0,
+                        modifiedAt: replacement.metadata(for: replacement.rootID).modifiedAt,
+                        identity: nil,
+                        unreadable: replacement.isUnreadable(replacement.rootID)
+                    )
+                    copyContents(from: replacement, sourceParent: replacement.rootID, to: destination, builder: &builder)
+                    continue
+                }
+
+                let destination = builder.addNode(
+                    parent: destinationParent,
+                    name: metadata.name,
+                    kind: metadata.kind,
+                    allocatedBytes: metadata.intrinsicAllocatedBytes,
+                    logicalBytes: metadata.logicalBytes,
+                    modifiedAt: metadata.modifiedAt,
+                    identity: nil,
+                    unreadable: source.isUnreadable(child)
+                )
+                if metadata.isDirectory {
+                    copyContents(from: source, sourceParent: child, to: destination, builder: &builder)
+                }
+            }
+        }
+
+        if synthetic {
+            for child in existing.children(of: existing.rootID) {
+                let metadata = existing.metadata(for: child)
+                let physicalURL = existing.roots.first(where: { $0.nodeID == child })?.url ?? metadata.url
+                let destination = builder.addPhysicalRoot(name: metadata.name, url: physicalURL, parent: builder.rootID)
+                if let replacement = replacements[physicalURL.standardizedFileURL.path] {
+                    copyContents(from: replacement, sourceParent: replacement.rootID, to: destination, builder: &builder)
+                } else {
+                    copyContents(from: existing, sourceParent: child, to: destination, builder: &builder)
+                }
+            }
+        } else if let replacement = replacements[existing.displayURL.standardizedFileURL.path] {
+            copyContents(from: replacement, sourceParent: replacement.rootID, to: builder.rootID, builder: &builder)
+        } else {
+            copyContents(from: existing, sourceParent: existing.rootID, to: builder.rootID, builder: &builder)
+        }
+        return try builder.finalize()
     }
+}
+
+private func saturatingProgressAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+    let positive = max(0, rhs)
+    let result = lhs.addingReportingOverflow(positive)
+    return result.overflow ? .max : result.partialValue
 }

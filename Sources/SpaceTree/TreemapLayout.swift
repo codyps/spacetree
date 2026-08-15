@@ -1,61 +1,84 @@
-import CoreGraphics
+import SwiftUI
 
 enum TreemapLayout {
-    struct Item: Identifiable, Equatable, Sendable {
-        let id: String
+    struct Item: Equatable, Sendable {
+        let id: NodeID
         let weight: Double
     }
 
-    static func rectangles(for items: [Item], in bounds: CGRect) -> [String: CGRect] {
-        guard !items.isEmpty, bounds.width > 0, bounds.height > 0 else { return [:] }
-        let positiveItems = items.map { Item(id: $0.id, weight: max(1, $0.weight)) }
-        let total = positiveItems.reduce(0) { $0 + $1.weight }
-        let scale = Double(bounds.width * bounds.height) / total
-        let remaining = positiveItems.map { ($0, $0.weight * scale) }
-        var nextIndex = 0
-        var result: [String: CGRect] = [:]
-        var available = bounds
-        var row: [(Item, Double)] = []
+    static func rectangles(for items: [Item], in bounds: CGRect) -> [CGRect] {
+        rectangles(for: items, in: bounds, weight: \.weight)
+    }
 
-        while nextIndex < remaining.count {
-            let next = remaining[nextIndex]
+    static func rectangles<Element>(
+        for items: [Element],
+        in bounds: CGRect,
+        weight: (Element) -> Double
+    ) -> [CGRect] {
+        guard !items.isEmpty, bounds.width > 0, bounds.height > 0 else { return [] }
+        let total = items.reduce(0) { $0 + max(1, weight($1)) }
+        let scale = Double(bounds.width * bounds.height) / total
+        var nextIndex = 0
+        var result = Array(repeating: CGRect.zero, count: items.count)
+        var available = bounds
+        var row: [(Int, Double)] = []
+        var rowMetrics = RowMetrics()
+
+        while nextIndex < items.count {
+            let next = (nextIndex, max(1, weight(items[nextIndex])) * scale)
             let side = Double(min(available.width, available.height))
-            if row.isEmpty || worstAspect(of: row + [next], on: side) <= worstAspect(of: row, on: side) {
+            let candidateMetrics = rowMetrics.adding(next.1)
+            if row.isEmpty || worstAspect(of: candidateMetrics, on: side) <= worstAspect(of: rowMetrics, on: side) {
                 row.append(next)
+                rowMetrics = candidateMetrics
                 nextIndex += 1
             } else {
-                layout(row: row, in: &available, result: &result)
+                layout(row: row, totalArea: rowMetrics.sum, in: &available, result: &result)
                 row.removeAll(keepingCapacity: true)
+                rowMetrics = RowMetrics()
             }
         }
-        if !row.isEmpty { layout(row: row, in: &available, result: &result) }
+        if !row.isEmpty {
+            layout(row: row, totalArea: rowMetrics.sum, in: &available, result: &result)
+        }
         return result
     }
 
-    private static func worstAspect(of row: [(Item, Double)], on side: Double) -> Double {
-        guard !row.isEmpty, side > 0 else { return .infinity }
-        let sum = row.reduce(0) { $0 + $1.1 }
-        let largest = row.map(\.1).max() ?? 0
-        let smallest = row.map(\.1).min() ?? 0
-        guard smallest > 0 else { return .infinity }
+    private struct RowMetrics {
+        var sum = 0.0
+        var largest = 0.0
+        var smallest = Double.infinity
+
+        func adding(_ area: Double) -> RowMetrics {
+            RowMetrics(
+                sum: sum + area,
+                largest: max(largest, area),
+                smallest: min(smallest, area)
+            )
+        }
+    }
+
+    private static func worstAspect(of row: RowMetrics, on side: Double) -> Double {
+        guard row.sum > 0, row.smallest > 0, side > 0 else { return .infinity }
         let sideSquared = side * side
-        return max((sideSquared * largest) / (sum * sum), (sum * sum) / (sideSquared * smallest))
+        return max(
+            (sideSquared * row.largest) / (row.sum * row.sum),
+            (row.sum * row.sum) / (sideSquared * row.smallest)
+        )
     }
 
     private static func layout(
-        row: [(Item, Double)],
+        row: [(Int, Double)],
+        totalArea: Double,
         in available: inout CGRect,
-        result: inout [String: CGRect]
+        result: inout [CGRect]
     ) {
-        let totalArea = row.reduce(0) { $0 + $1.1 }
         if available.width >= available.height {
             let stripWidth = totalArea / Double(available.height)
             var y = Double(available.minY)
             for (index, pair) in row.enumerated() {
-                let height = index == row.count - 1
-                    ? Double(available.maxY) - y
-                    : pair.1 / stripWidth
-                result[pair.0.id] = CGRect(x: available.minX, y: y, width: stripWidth, height: height)
+                let height = index == row.count - 1 ? Double(available.maxY) - y : pair.1 / stripWidth
+                result[pair.0] = CGRect(x: available.minX, y: y, width: stripWidth, height: height)
                 y += height
             }
             available.origin.x += stripWidth
@@ -64,10 +87,8 @@ enum TreemapLayout {
             let stripHeight = totalArea / Double(available.width)
             var x = Double(available.minX)
             for (index, pair) in row.enumerated() {
-                let width = index == row.count - 1
-                    ? Double(available.maxX) - x
-                    : pair.1 / stripHeight
-                result[pair.0.id] = CGRect(x: x, y: available.minY, width: width, height: stripHeight)
+                let width = index == row.count - 1 ? Double(available.maxX) - x : pair.1 / stripHeight
+                result[pair.0] = CGRect(x: x, y: available.minY, width: width, height: stripHeight)
                 x += width
             }
             available.origin.y += stripHeight
@@ -78,9 +99,11 @@ enum TreemapLayout {
 
 struct TreemapScene: Sendable {
     struct Entry: Identifiable, Sendable {
-        let node: FileNode
+        let nodeID: NodeID
+        let allocatedBytes: Int64
+        let category: FileCategory
 
-        var id: String { node.id }
+        var id: NodeID { nodeID }
     }
 
     struct Tile: Sendable {
@@ -88,46 +111,108 @@ struct TreemapScene: Sendable {
         let rect: CGRect
     }
 
+    struct Hit: Sendable {
+        let entry: Entry
+        let rect: CGRect
+    }
+
+    let tree: ScanTree
     let entries: [Entry]
     let tiles: [Tile]
+    let fillPaths: [Path]
+    let labeledTileIndices: [Int]
     let totalSize: Int64
     private let hitIndex: TreemapHitIndex
 
-    static func build(nodes: [FileNode], in bounds: CGRect) -> TreemapScene {
-        var stack = Array(nodes.reversed())
+    static func build(tree: ScanTree, nodes: [NodeID], in bounds: CGRect) -> TreemapScene {
         var entries: [Entry] = []
-        entries.reserveCapacity(nodes.reduce(0) { $0 + max(1, $1.fileCount) })
+        var tiles: [Tile] = []
+        let estimatedFileCount = nodes.reduce(0) { $0 + tree.fileCount(of: $1) }
+        entries.reserveCapacity(estimatedFileCount)
+        tiles.reserveCapacity(estimatedFileCount)
 
-        while let node = stack.popLast() {
-            if node.isDirectory {
-                stack.append(contentsOf: node.children.reversed())
-            } else {
-                entries.append(Entry(node: node))
+        var pending = Array(arrangedNodes(tree: tree, nodes: nodes, in: bounds).reversed())
+        while let region = pending.popLast() {
+            let kind = tree.kind(of: region.nodeID)
+            if kind == .directory || kind == .syntheticRoot {
+                pending.append(contentsOf: arrangedNodes(
+                    tree: tree,
+                    nodes: tree.children(of: region.nodeID),
+                    in: region.rect
+                ).reversed())
+                continue
+            }
+
+            let entryIndex = entries.count
+            entries.append(Entry(
+                nodeID: region.nodeID,
+                allocatedBytes: tree.allocatedBytes(of: region.nodeID),
+                category: FilePalette.category(forExtension: tree.fileExtension(of: region.nodeID))
+            ))
+            tiles.append(Tile(entryIndex: entryIndex, rect: region.rect))
+        }
+
+        var fillPaths = FileCategory.allCases.map { _ in Path() }
+        var labeledTileIndices: [Int] = []
+        for (tileIndex, tile) in tiles.enumerated() {
+            let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
+            let rect = tile.rect.insetBy(dx: gap, dy: gap)
+            fillPaths[Int(entries[tile.entryIndex].category.rawValue)].addRect(rect)
+            if rect.width >= 78, rect.height >= 34 {
+                labeledTileIndices.append(tileIndex)
             }
         }
-        entries.sort {
-            if $0.node.size == $1.node.size { return $0.id < $1.id }
-            return $0.node.size > $1.node.size
-        }
-
-        let rectangles = TreemapLayout.rectangles(
-            for: entries.map { TreemapLayout.Item(id: $0.id, weight: Double($0.node.size)) },
-            in: bounds
-        )
-        let tiles = entries.enumerated().compactMap { index, entry in
-            rectangles[entry.id].map { Tile(entryIndex: index, rect: $0) }
-        }
         return TreemapScene(
+            tree: tree,
             entries: entries,
             tiles: tiles,
-            totalSize: entries.reduce(0) { $0 + $1.node.size },
+            fillPaths: fillPaths,
+            labeledTileIndices: labeledTileIndices,
+            totalSize: entries.reduce(0) { saturatingSceneAdd($0, $1.allocatedBytes) },
             hitIndex: TreemapHitIndex(tiles: tiles, bounds: bounds)
         )
     }
 
-    func entry(at point: CGPoint) -> Entry? {
-        guard let index = hitIndex.tileIndex(at: point, tiles: tiles) else { return nil }
-        return entries[tiles[index].entryIndex]
+    private struct NodeRegion {
+        let nodeID: NodeID
+        let rect: CGRect
+    }
+
+    private static func arrangedNodes(
+        tree: ScanTree,
+        nodes: [NodeID],
+        in bounds: CGRect
+    ) -> [NodeRegion] {
+        var items: [TreemapLayout.Item] = []
+        items.reserveCapacity(nodes.count)
+        for nodeID in nodes {
+            let kind = tree.kind(of: nodeID)
+            let isDirectory = kind == .directory || kind == .syntheticRoot
+            let fileCount = tree.fileCount(of: nodeID)
+            if isDirectory, fileCount == 0 { continue }
+            let allocatedBytes = tree.allocatedBytes(of: nodeID)
+            let weight = isDirectory
+                ? max(Double(allocatedBytes), Double(fileCount))
+                : max(1, Double(allocatedBytes))
+            items.append(TreemapLayout.Item(id: nodeID, weight: weight))
+        }
+        items.sort {
+            if $0.weight == $1.weight { return $0.id < $1.id }
+            return $0.weight > $1.weight
+        }
+        let rectangles = TreemapLayout.rectangles(for: items, in: bounds)
+        return zip(items, rectangles).map { NodeRegion(nodeID: $0.id, rect: $1) }
+    }
+
+    func hit(at point: CGPoint) -> Hit? {
+        guard let tileIndex = hitIndex.tileIndex(at: point, tiles: tiles) else { return nil }
+        let tile = tiles[tileIndex]
+        return Hit(entry: entries[tile.entryIndex], rect: tile.rect)
+    }
+
+    func rect(for nodeID: NodeID) -> CGRect? {
+        guard let tile = tiles.first(where: { entries[$0.entryIndex].nodeID == nodeID }) else { return nil }
+        return tile.rect
     }
 }
 
@@ -175,4 +260,9 @@ private struct TreemapHitIndex: Sendable {
         let maxRow = min(rows - 1, max(0, Int((rect.maxY - bounds.minY) / max(1, bounds.height) * Double(rows))))
         return (minColumn, maxColumn, minRow, maxRow)
     }
+}
+
+private func saturatingSceneAdd(_ lhs: Int64, _ rhs: Int64) -> Int64 {
+    let result = lhs.addingReportingOverflow(rhs)
+    return result.overflow ? .max : result.partialValue
 }

@@ -1,12 +1,14 @@
 import SwiftUI
 
 struct TreemapView: View {
-    let nodes: [FileNode]
-    let selectedID: FileNode.ID?
-    let onSelect: (FileNode) -> Void
+    let tree: ScanTree
+    let nodeIDs: [NodeID]
+    let selectedID: NodeID?
+    let onSelect: (NodeMetadata) -> Void
 
     @State private var scene: TreemapScene?
-    @State private var hoveredEntry: TreemapScene.Entry?
+    @State private var hoveredHit: TreemapScene.Hit?
+    @State private var selectedRect: CGRect?
     @State private var isPreparing = false
 
     var body: some View {
@@ -18,55 +20,62 @@ struct TreemapView: View {
                 if let scene {
                     Canvas(opaque: true, colorMode: .nonLinear, rendersAsynchronously: true) { context, _ in
                         context.fill(Path(bounds), with: .color(.black.opacity(0.28)))
-                        for tile in scene.tiles {
+                        for category in FileCategory.allCases {
+                            context.fill(
+                                scene.fillPaths[Int(category.rawValue)],
+                                with: .color(FilePalette.color(for: category))
+                            )
+                        }
+                        for tileIndex in scene.labeledTileIndices {
+                            let tile = scene.tiles[tileIndex]
                             let entry = scene.entries[tile.entryIndex]
                             let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
                             let rect = tile.rect.insetBy(dx: gap, dy: gap)
-                            context.fill(
-                                Path(rect),
-                                with: .color(FilePalette.color(forExtension: entry.node.url.pathExtension.lowercased()))
+                            let label = Text(scene.tree.name(of: entry.nodeID))
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.white)
+                            context.draw(label, in: rect.insetBy(dx: 5, dy: 4))
+                        }
+                        if let rect = selectedRect {
+                            let gap: CGFloat = rect.width > 2 && rect.height > 2 ? 0.5 : 0
+                            context.stroke(
+                                Path(rect.insetBy(dx: gap + 1, dy: gap + 1)),
+                                with: .color(.white),
+                                lineWidth: 3
                             )
-
-                            if selectedID == entry.id || hoveredEntry?.id == entry.id {
-                                context.stroke(
-                                    Path(rect.insetBy(dx: 1, dy: 1)),
-                                    with: .color(.white),
-                                    lineWidth: selectedID == entry.id ? 3 : 2
-                                )
-                            }
-
-                            if rect.width >= 78, rect.height >= 34 {
-                                let label = Text(entry.node.name)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.white)
-                                context.draw(
-                                    label,
-                                    in: rect.insetBy(dx: 5, dy: 4)
-                                )
-                            }
+                        }
+                        if let hoveredHit, hoveredHit.entry.nodeID != selectedID {
+                            let rect = hoveredHit.rect
+                            let gap: CGFloat = rect.width > 2 && rect.height > 2 ? 0.5 : 0
+                            context.stroke(
+                                Path(rect.insetBy(dx: gap + 1, dy: gap + 1)),
+                                with: .color(.white),
+                                lineWidth: 2
+                            )
                         }
                     }
                     .onContinuousHover { phase in
                         switch phase {
-                        case .active(let location):
-                            hoveredEntry = scene.entry(at: location)
-                        case .ended:
-                            hoveredEntry = nil
+                        case .active(let location): hoveredHit = scene.hit(at: location)
+                        case .ended: hoveredHit = nil
                         }
                     }
                     .gesture(
                         SpatialTapGesture().onEnded { value in
-                            if let entry = scene.entry(at: value.location) {
-                                onSelect(entry.node)
+                            if let hit = scene.hit(at: value.location) {
+                                onSelect(scene.tree.metadata(for: hit.entry.nodeID))
                             }
                         }
                     )
                     .overlay(alignment: .bottomLeading) {
-                        if let entry = hoveredEntry {
-                            HoverCard(entry: entry, totalSize: scene.totalSize)
+                        if let hoveredHit {
+                            HoverCard(node: scene.tree.metadata(for: hoveredHit.entry.nodeID), totalSize: scene.totalSize)
                                 .padding(10)
                                 .allowsHitTesting(false)
                         }
+                    }
+                    .onChange(of: selectedID) { _, newValue in
+                        selectedRect = newValue.flatMap { scene.rect(for: $0) }
                     }
                 } else if isPreparing {
                     VStack(spacing: 8) {
@@ -78,7 +87,7 @@ struct TreemapView: View {
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 8))
-            .task(id: LayoutRequest(nodes: nodes, size: geometry.size)) {
+            .task(id: LayoutRequest(tree: tree, nodeIDs: nodeIDs, size: geometry.size)) {
                 await prepareScene(in: bounds)
             }
         }
@@ -91,45 +100,50 @@ struct TreemapView: View {
         guard bounds.width > 0, bounds.height > 0 else { return }
         isPreparing = true
         scene = nil
-        hoveredEntry = nil
-        let input = nodes
+        hoveredHit = nil
+        selectedRect = nil
+        let inputTree = tree
+        let inputNodes = nodeIDs
         let prepared = await Task.detached(priority: .userInitiated) {
-            TreemapScene.build(nodes: input, in: bounds)
+            TreemapScene.build(tree: inputTree, nodes: inputNodes, in: bounds)
         }.value
         guard !Task.isCancelled else { return }
         scene = prepared
+        selectedRect = selectedID.flatMap { prepared.rect(for: $0) }
         isPreparing = false
     }
 }
 
 private struct LayoutRequest: Equatable {
+    let generation: TreeGeneration
     let width: Int
     let height: Int
-    let nodeIDs: [String]
+    let nodeIDs: [NodeID]
     let sizes: [Int64]
 
-    init(nodes: [FileNode], size: CGSize) {
+    init(tree: ScanTree, nodeIDs: [NodeID], size: CGSize) {
+        generation = tree.generation
         width = Int(size.width.rounded())
         height = Int(size.height.rounded())
-        nodeIDs = nodes.map(\.id)
-        sizes = nodes.map(\.size)
+        self.nodeIDs = nodeIDs
+        sizes = nodeIDs.map { tree.allocatedBytes(of: $0) }
     }
 }
 
 private struct HoverCard: View {
-    let entry: TreemapScene.Entry
+    let node: NodeMetadata
     let totalSize: Int64
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(entry.node.name)
+            Text(node.name)
                 .font(.callout.weight(.semibold))
                 .lineLimit(1)
-            Text(entry.node.url.path)
+            Text(node.url.path)
                 .font(.system(.caption2, design: .monospaced))
                 .lineLimit(1)
                 .truncationMode(.middle)
-            Text("\(entry.node.size.formattedByteCount) · \(percentage.formatted(.percent.precision(.fractionLength(2))))")
+            Text("\(node.allocatedBytes.formattedByteCount) · \(percentage.formatted(.percent.precision(.fractionLength(2))))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -141,6 +155,6 @@ private struct HoverCard: View {
     }
 
     private var percentage: Double {
-        totalSize > 0 ? Double(entry.node.size) / Double(totalSize) : 0
+        totalSize > 0 ? Double(node.allocatedBytes) / Double(totalSize) : 0
     }
 }

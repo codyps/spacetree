@@ -233,7 +233,7 @@ private struct ScanTargetCard: View {
             HStack(spacing: 9) {
                 if let root = target.root {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(root.size.formattedByteCount)
+                        Text(root.allocatedBytes.formattedByteCount)
                             .font(.headline.monospacedDigit())
                         Text(completionDetail(root: root))
                             .font(.caption)
@@ -269,7 +269,7 @@ private struct ScanTargetCard: View {
         return .teal
     }
 
-    private func completionDetail(root: FileNode) -> String {
+    private func completionDetail(root: NodeMetadata) -> String {
         if target.hasFilesystemChanges {
             return "Changes detected · \(root.fileCount.formatted()) files"
         }
@@ -298,11 +298,14 @@ private struct ExplorerView: View {
                                 systemImage: "square.grid.3x3"
                             )
                         } else {
-                            TreemapView(
-                                nodes: target.visibleChildren,
-                                selectedID: target.selected?.id,
-                                onSelect: { target.selected = $0 }
-                            )
+                            if let tree = target.tree {
+                                TreemapView(
+                                    tree: tree,
+                                    nodeIDs: target.visibleChildren.map(\.handle.nodeID),
+                                    selectedID: target.selectedID,
+                                    onSelect: target.select
+                                )
+                            }
                         }
                     }
                     .padding(10)
@@ -332,7 +335,7 @@ private struct BreadcrumbBar: View {
                         HStack(spacing: 4) {
                             Image(systemName: index == 0 ? "externaldrive.fill" : "folder.fill")
                             Text(node.name)
-                            Text(node.size.formattedByteCount).foregroundStyle(.secondary)
+                            Text(node.allocatedBytes.formattedByteCount).foregroundStyle(.secondary)
                         }
                     }
                     .buttonStyle(.plain)
@@ -361,7 +364,7 @@ private struct SummarySidebar: View {
                 }
 
                 Divider()
-                Metric(value: current.size.formattedByteCount, label: "Allocated size", alignment: .leading)
+                Metric(value: current.allocatedBytes.formattedByteCount, label: "Allocated size", alignment: .leading)
                 Metric(value: current.fileCount.formatted(), label: "Files", alignment: .leading)
                 Metric(value: max(0, current.directoryCount - 1).formatted(), label: "Folders", alignment: .leading)
                 if current.duplicateReferenceCount > 0 {
@@ -378,7 +381,7 @@ private struct SummarySidebar: View {
                 Text("Largest here")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                ForEach(Array(current.children.prefix(6))) { node in
+                ForEach(Array(target.currentChildren.prefix(6))) { node in
                     Button { target.open(node) } label: {
                         HStack(spacing: 7) {
                             RoundedRectangle(cornerRadius: 3)
@@ -386,7 +389,7 @@ private struct SummarySidebar: View {
                                 .frame(width: 9, height: 24)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(node.name).lineLimit(1)
-                                Text(node.size.formattedByteCount)
+                                Text(node.allocatedBytes.formattedByteCount)
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
@@ -441,7 +444,7 @@ private struct FileListView: View {
 
             List(target.visibleChildren, selection: Binding(
                 get: { target.selected?.id },
-                set: { id in target.selected = target.visibleChildren.first(where: { $0.id == id }) }
+                set: { id in target.select(target.visibleChildren.first(where: { $0.id == id })) }
             )) { node in
                 FileRow(node: node)
                     .tag(node.id)
@@ -454,7 +457,7 @@ private struct FileListView: View {
 }
 
 private struct FileRow: View {
-    let node: FileNode
+    let node: NodeMetadata
 
     var body: some View {
         HStack(spacing: 8) {
@@ -470,7 +473,7 @@ private struct FileRow: View {
             Text(node.isDirectory ? node.fileCount.formatted() : "—")
                 .monospacedDigit()
                 .frame(width: 70, alignment: .trailing)
-            Text(node.size.formattedByteCount)
+            Text(node.allocatedBytes.formattedByteCount)
                 .monospacedDigit()
                 .frame(width: 100, alignment: .trailing)
             Text(node.modifiedAt?.formatted(date: .abbreviated, time: .omitted) ?? "—")

@@ -8,7 +8,7 @@ SpaceTree is a native macOS disk space analyzer inspired by WizTree. It discover
 ## Features
 
 - Native SwiftUI interface with no third-party dependencies
-- Squarified, proportional treemap with a separate hoverable tile for every file
+- Squarified, proportional treemap with a separate hoverable tile for every file, spatially grouped by directory
 - Background treemap layout and asynchronous Canvas rendering keep the interface responsive
 - Double-click folder drill-down with breadcrumb navigation
 - File/folder detail list, search, and Finder reveal
@@ -75,7 +75,7 @@ Container scans visit each constituent filesystem exactly once and stop at mount
 
 ### Scan performance
 
-On supported macOS filesystems, SpaceTree retrieves names, types, file IDs, sizes, allocation sizes, and modification dates for many directory entries in each `getattrlistbulk` call. Up to four directory reads run concurrently, while separate mounted filesystems in an APFS container scan in parallel. Filesystems that do not support bulk attributes automatically use Foundation's prefetched directory enumeration.
+On supported macOS filesystems, SpaceTree retrieves names, types, file IDs, sizes, allocation sizes, and modification dates for many directory entries in each `getattrlistbulk` call. Up to eight directory reads run concurrently, while separate mounted filesystems in an APFS container scan in parallel. Filesystems that do not support bulk attributes automatically use descriptor-relative `readdir`/`fstatat` enumeration. Directory descriptors are opened with `O_NOFOLLOW`, and entry metadata is read with `AT_SYMLINK_NOFOLLOW`.
 
 Completed trees are stored as binary snapshots in the user's Application Support directory. SpaceTree monitors their roots with FSEvents. Clicking **Check** on an unchanged result returns immediately; when changes are reported, **Update** rescans and replaces only affected directory subtrees. Dropped events, root changes, very large change sets, or trees containing hard-link references conservatively trigger a full rescan.
 

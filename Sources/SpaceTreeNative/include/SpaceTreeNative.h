@@ -15,6 +15,7 @@ typedef struct {
     char *name;
     uint64_t device_id;
     uint64_t file_id;
+    uint32_t link_count;
     int64_t logical_size;
     int64_t allocated_size;
     int64_t modified_seconds;

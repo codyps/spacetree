@@ -31,9 +31,9 @@ final class ScanTarget: Identifiable {
     let persistResults: Bool
     var state: State = .idle
     var progress: ScanProgress
-    var root: FileNode?
-    var current: FileNode?
-    var selected: FileNode?
+    var tree: ScanTree?
+    var currentID: NodeID?
+    var selectedID: NodeID?
     var searchText = ""
     var scannedAt: Date?
     var scanDuration: TimeInterval?
@@ -94,27 +94,36 @@ final class ScanTarget: Identifiable {
         }
     }
 
-    var visibleChildren: [FileNode] {
-        guard let current else { return [] }
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return current.children }
-        return current.children.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    var root: NodeMetadata? {
+        guard let tree else { return nil }
+        return tree.metadata(for: tree.rootID)
     }
 
-    var breadcrumbs: [FileNode] {
-        guard let root, let current else { return [] }
-        if root.id == current.id { return [root] }
-        var result = [root]
-        var node = root
-        let targetPath = current.url.standardizedFileURL.path
-        while node.id != current.id,
-              let next = node.children.first(where: {
-                  $0.isDirectory && (targetPath == $0.url.path || targetPath.hasPrefix($0.url.path + "/"))
-              }) {
-            result.append(next)
-            node = next
-        }
-        return result
+    var current: NodeMetadata? {
+        guard let tree, let currentID else { return nil }
+        return tree.metadata(for: currentID)
+    }
+
+    var selected: NodeMetadata? {
+        guard let tree, let selectedID else { return nil }
+        return tree.metadata(for: selectedID)
+    }
+
+    var visibleChildren: [NodeMetadata] {
+        let children = currentChildren
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return children }
+        return children.filter { $0.name.localizedCaseInsensitiveContains(query) }
+    }
+
+    var currentChildren: [NodeMetadata] {
+        guard let tree, let currentID else { return [] }
+        return tree.children(of: currentID).map { tree.metadata(for: $0) }
+    }
+
+    var breadcrumbs: [NodeMetadata] {
+        guard let tree, let currentID else { return [] }
+        return tree.breadcrumbs(to: currentID).map { tree.metadata(for: $0) }
     }
 
     func scan() {
@@ -126,9 +135,9 @@ final class ScanTarget: Identifiable {
         let thisGeneration = generation
         let scanStartedAt = Date()
         let startingEventID = UInt64(FSEventsGetCurrentEventId())
-        root = nil
-        current = nil
-        selected = nil
+        tree = nil
+        currentID = nil
+        selectedID = nil
         searchText = ""
         hasFilesystemChanges = false
         changedPathCount = 0
@@ -169,7 +178,7 @@ final class ScanTarget: Identifiable {
         generation = UUID()
         task?.cancel()
         task = nil
-        if root == nil {
+        if tree == nil {
             state = .idle
         } else {
             state = .complete
@@ -200,9 +209,9 @@ final class ScanTarget: Identifiable {
         let expectedGeneration = generation
         Task { [weak self] in
             guard let self, let snapshot = await SnapshotStore.load(targetID: id) else { return }
-            guard generation == expectedGeneration, state == .idle, root == nil else { return }
-            root = snapshot.root
-            current = snapshot.root
+            guard generation == expectedGeneration, state == .idle, tree == nil else { return }
+            tree = snapshot.tree
+            currentID = snapshot.tree.rootID
             progress = snapshot.progress
             scannedAt = snapshot.scannedAt
             scanDuration = snapshot.scanDuration
@@ -211,14 +220,18 @@ final class ScanTarget: Identifiable {
         }
     }
 
-    func open(_ node: FileNode) {
+    func open(_ node: NodeMetadata) {
         if node.isDirectory {
-            current = node
-            selected = nil
+            currentID = node.handle.nodeID
+            selectedID = nil
             searchText = ""
         } else {
-            selected = node
+            selectedID = node.handle.nodeID
         }
+    }
+
+    func select(_ node: NodeMetadata?) {
+        selectedID = node?.handle.nodeID
     }
 
     func revealSelected() {
@@ -242,7 +255,7 @@ final class ScanTarget: Identifiable {
     }
 
     private func incrementalScan() {
-        guard let existingRoot = root else { scan(); return }
+        guard let existingTree = tree else { scan(); return }
         task?.cancel()
         changeMonitor?.stop()
         changeMonitor = nil
@@ -259,7 +272,7 @@ final class ScanTarget: Identifiable {
             guard let self else { return }
             do {
                 let result = try await DiskScanner.refresh(
-                    root: existingRoot,
+                    root: existingTree,
                     changedPaths: paths,
                     scanRoots: roots
                 ) { [weak self] update in
@@ -282,18 +295,19 @@ final class ScanTarget: Identifiable {
         }
     }
 
-    private func finishScan(_ result: FileNode, startedAt: Date, eventID: UInt64) {
-        root = result
-        current = result
-        selected = nil
+    private func finishScan(_ result: ScanTree, startedAt: Date, eventID: UInt64) {
+        tree = result
+        currentID = result.rootID
+        selectedID = nil
+        let root = result.metadata(for: result.rootID)
         scannedAt = Date()
         scanDuration = Date().timeIntervalSince(startedAt)
         progress = ScanProgress(
             currentPath: name,
-            itemCount: result.fileCount + result.directoryCount,
-            bytesFound: result.size,
+            itemCount: root.fileCount + root.directoryCount,
+            bytesFound: root.allocatedBytes,
             unreadableCount: progress.unreadableCount,
-            duplicateReferenceCount: result.duplicateReferenceCount
+            duplicateReferenceCount: root.duplicateReferenceCount
         )
         hasFilesystemChanges = false
         changedPathCount = 0
@@ -305,7 +319,7 @@ final class ScanTarget: Identifiable {
         let snapshot = ScanSnapshot(
             version: ScanSnapshot.currentVersion,
             targetID: id,
-            root: result,
+            tree: result,
             progress: progress,
             scannedAt: scannedAt ?? Date(),
             scanDuration: scanDuration ?? 0,
