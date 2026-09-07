@@ -1,7 +1,26 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+           let icon = NSImage(contentsOf: iconURL) {
+            NSApplication.shared.applicationIconImage = icon
+        }
+
+        // SwiftPM launches an unbundled executable, so opt into the menu bar and Dock.
+        NSApplication.shared.setActivationPolicy(.regular)
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
 
 @main
 struct SpaceTreeApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -12,6 +31,17 @@ struct SpaceTreeApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandMenu("Go") {
+                Button("Back") { model.viewingTarget?.goBack() }
+                    .keyboardShortcut("[", modifiers: .command)
+                    .disabled(model.viewingTarget?.canGoBack != true)
+                Button("Forward") { model.viewingTarget?.goForward() }
+                    .keyboardShortcut("]", modifiers: .command)
+                    .disabled(model.viewingTarget?.canGoForward != true)
+                Button("Enclosing Folder") { model.viewingTarget?.goUp() }
+                    .keyboardShortcut(.upArrow, modifiers: .command)
+                    .disabled(model.viewingTarget?.canGoUp != true)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Choose Folder…") { model.chooseFolder() }
                     .keyboardShortcut("o")

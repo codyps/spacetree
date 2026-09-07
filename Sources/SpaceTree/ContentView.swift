@@ -5,11 +5,13 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ToolbarView()
-            Divider()
             if let target = model.viewingTarget {
+                ExplorerToolbar(target: target)
+                Divider()
                 ExplorerView(target: target)
             } else {
+                ToolbarView()
+                Divider()
                 DashboardView()
             }
         }
@@ -33,59 +35,32 @@ private struct ToolbarView: View {
 
             Divider().frame(height: 22)
 
-            if let target = model.viewingTarget {
-                Button(action: model.showDashboard) {
-                    Label("All scans", systemImage: "chevron.left")
-                }
-                Text(target.name)
-                    .font(.headline)
-                    .lineLimit(1)
-                if target.state == .scanning {
-                    ProgressView().controlSize(.small)
-                } else if target.hasFilesystemChanges {
-                    Label("Changes detected", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                Spacer()
-                if target.root != nil {
-                    @Bindable var target = target
-                    TextField("Filter this folder", text: $target.searchText)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 210)
-                    Button(action: target.revealSelected) {
-                        Label("Reveal", systemImage: "scope")
-                    }
-                    .disabled(target.selected == nil)
-                }
-            } else {
-                Button(action: model.chooseFolder) {
-                    Label("Add Folder", systemImage: "folder.badge.plus")
-                }
-                .buttonStyle(.borderedProminent)
-
-                Button(action: model.scanHome) {
-                    Label("Add Home", systemImage: "house")
-                }
-
-                Button(action: model.refreshMountedItems) {
-                    Label("Refresh Volumes", systemImage: "arrow.clockwise")
-                }
-
-                Spacer()
-
-                if model.scanningCount > 0 {
-                    Text("\(model.scanningCount) scanning")
-                        .foregroundStyle(.secondary)
-                    Button(role: .cancel, action: model.cancelAll) {
-                        Label("Stop All", systemImage: "stop.fill")
-                    }
-                }
-                Button(action: model.scanAll) {
-                    Label("Scan All", systemImage: "play.fill")
-                }
-                .disabled(model.visibleTargets.isEmpty)
+            Button(action: model.chooseFolder) {
+                Label("Add Folder", systemImage: "folder.badge.plus")
             }
+            .buttonStyle(.borderedProminent)
+
+            Button(action: model.scanHome) {
+                Label("Add Home", systemImage: "house")
+            }
+
+            Button(action: model.refreshMountedItems) {
+                Label("Refresh Volumes", systemImage: "arrow.clockwise")
+            }
+
+            Spacer()
+
+            if model.scanningCount > 0 {
+                Text("\(model.scanningCount) scanning")
+                    .foregroundStyle(.secondary)
+                Button(role: .cancel, action: model.cancelAll) {
+                    Label("Stop All", systemImage: "stop.fill")
+                }
+            }
+            Button(action: model.scanAll) {
+                Label("Scan All", systemImage: "play.fill")
+            }
+            .disabled(model.visibleTargets.isEmpty)
         }
         .controlSize(.small)
         .frame(height: 50)
@@ -238,12 +213,30 @@ private struct ScanTargetCard: View {
                     Text(target.progress.bytesFound.formattedByteCount)
                     Button("Stop", role: .cancel, action: target.cancel)
                 }
-                Text(target.progress.currentPath)
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 300)
+                // Both scan phases occupy the same single-line status slot.
+                Group {
+                    if let finishing = target.progress.finishing {
+                        HStack(spacing: 8) {
+                            Text("Finishing: \(finishing.stage)")
+                                .font(.caption2)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .help("Finishing: \(finishing.stage)")
+                            ProgressView(value: Double(finishing.completed), total: Double(max(1, finishing.total)))
+                                .progressViewStyle(.linear)
+                                .frame(width: 80)
+                        }
+                    } else {
+                        Text(target.progress.currentPath)
+                            .font(.system(.caption2, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .frame(width: 330, height: 16, alignment: .trailing)
             }
         case .complete:
             HStack(spacing: 9) {
@@ -307,47 +300,109 @@ private struct ScanTargetCard: View {
 
 private struct ExplorerView: View {
     @Bindable var target: ScanTarget
+    @State private var revealRequest = 0
 
     var body: some View {
-        HSplitView {
-            SummarySidebar(target: target)
-                .frame(minWidth: 190, idealWidth: 220, maxWidth: 280)
-            VStack(spacing: 0) {
-                BreadcrumbBar(target: target)
-                VSplitView {
-                    VStack(spacing: 8) {
-                        LegendView()
-                        if target.visibleChildren.isEmpty {
-                            ContentUnavailableView(
-                                target.searchText.isEmpty ? "This folder is empty" : "No matches",
-                                systemImage: "square.grid.3x3"
+        VStack(spacing: 0) {
+            VSplitView {
+                VStack(spacing: 8) {
+                    LegendView()
+                    if target.visibleChildren.isEmpty {
+                        ContentUnavailableView(
+                            target.searchText.isEmpty ? "This folder is empty" : "No matches",
+                            systemImage: "square.grid.3x3"
+                        )
+                    } else {
+                        if let tree = target.tree {
+                            TreemapView(
+                                tree: tree,
+                                nodeIDs: target.visibleChildren.map(\.handle.nodeID),
+                                selectedID: target.selectedID,
+                                onSelect: { node in
+                                    target.select(node)
+                                    revealRequest += 1
+                                }
                             )
-                        } else {
-                            if let tree = target.tree {
-                                TreemapView(
-                                    tree: tree,
-                                    nodeIDs: target.visibleChildren.map(\.handle.nodeID),
-                                    selectedID: target.selectedID,
-                                    onSelect: target.select
-                                )
-                            }
                         }
                     }
-                    .padding(10)
-                    .frame(minHeight: 260)
-
-                    FileListView(target: target)
-                        .frame(minHeight: 180, idealHeight: 250)
                 }
+                .padding(10)
+                .frame(minHeight: 260)
+
+                FileListView(target: target, revealRequest: revealRequest)
+                    .frame(minHeight: 180, idealHeight: 250)
             }
         }
     }
 }
 
-private struct BreadcrumbBar: View {
+private struct ExplorerToolbar: View {
+    @Environment(AppModel.self) private var model
     @Bindable var target: ScanTarget
 
     var body: some View {
+        HStack(spacing: 8) {
+            Button(action: model.showDashboard) {
+                Label("All scans", systemImage: "square.grid.2x2")
+            }
+            .fixedSize()
+
+            HStack(spacing: 4) {
+                Button(action: target.goBack) {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .disabled(!target.canGoBack)
+                .help("Back (⌘[)")
+
+                Button(action: target.goForward) {
+                    Label("Forward", systemImage: "chevron.right")
+                }
+                .disabled(!target.canGoForward)
+                .help("Forward (⌘])")
+
+                Button(action: target.goUp) {
+                    Label("Up", systemImage: "arrow.up")
+                }
+                .disabled(!target.canGoUp)
+                .help("Enclosing Folder (⌘↑)")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .fixedSize()
+
+            Divider().frame(height: 20)
+            breadcrumbs
+                .frame(minWidth: 100, maxWidth: .infinity)
+
+            if target.state == .scanning {
+                ProgressView().controlSize(.small)
+            } else if target.hasFilesystemChanges {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.orange)
+                    .help("Changes detected")
+            }
+
+            ScanInfoBar(target: target)
+                .fixedSize()
+
+            TextField("Filter this folder", text: $target.searchText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 150)
+            Button(action: target.revealSelected) {
+                Label("Reveal", systemImage: "scope")
+            }
+            .labelStyle(.iconOnly)
+            .help("Reveal selected item in Finder")
+            .disabled(target.selected == nil)
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 12)
+        .frame(height: 42)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var breadcrumbs: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 5) {
                 ForEach(Array(target.breadcrumbs.enumerated()), id: \.element.id) { index, node in
@@ -364,70 +419,42 @@ private struct BreadcrumbBar: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .help(node.url.path)
                 }
             }
             .padding(.horizontal, 12)
         }
-        .frame(height: 38)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(alignment: .bottom) { Divider() }
     }
 }
 
-private struct SummarySidebar: View {
+private struct ScanInfoBar: View {
     @Bindable var target: ScanTarget
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            if let current = target.current {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(current.name).font(.headline).lineLimit(2)
-                    Text(current.url.path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(3)
-                }
-
-                Divider()
-                Metric(value: current.allocatedBytes.formattedByteCount, label: "Allocated size", alignment: .leading)
-                Metric(value: current.fileCount.formatted(), label: "Files", alignment: .leading)
-                Metric(value: max(0, current.directoryCount - 1).formatted(), label: "Folders", alignment: .leading)
+        if let current = target.current {
+            HStack(spacing: 10) {
+                Text(current.allocatedBytes.formattedByteCount)
+                    .fontWeight(.semibold)
+                    .help("Allocated size")
+                Text("\(current.fileCount.formatted()) files")
+                Text("\(max(0, current.directoryCount - 1).formatted()) folders")
                 if current.duplicateReferenceCount > 0 {
-                    Metric(value: current.duplicateReferenceCount.formatted(), label: "Hard-link refs not recounted", alignment: .leading)
+                    Text("\(current.duplicateReferenceCount.formatted()) links")
+                        .help("Hard-link references already counted elsewhere are not recounted.")
                 }
                 if target.progress.unreadableCount > 0 {
-                    Label("\(target.progress.unreadableCount) items could not be read", systemImage: "lock.fill")
+                    Label("\(target.progress.unreadableCount.formatted()) unreadable", systemImage: "lock.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
-                        .help("Some macOS folders require Full Disk Access in System Settings → Privacy & Security.")
-                }
-
-                Divider()
-                Text("Largest here")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(Array(target.currentChildren.prefix(6))) { node in
-                    Button { target.open(node) } label: {
-                        HStack(spacing: 7) {
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(FilePalette.color(for: node))
-                                .frame(width: 9, height: 24)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(node.name).lineLimit(1)
-                                Text(node.allocatedBytes.formattedByteCount)
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
+                        .fixedSize()
+                        .help("\(target.progress.unreadableCount.formatted()) items could not be read. Some macOS folders require Full Disk Access in System Settings → Privacy & Security.")
                 }
             }
-            Spacer()
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 }
 
@@ -449,11 +476,19 @@ private struct LegendView: View {
 
 private struct FileListView: View {
     @Bindable var target: ScanTarget
+    let revealRequest: Int
+    @State private var expanded: Set<NodeID> = []
+
+    private var rows: [FileTreeRow] {
+        guard let tree = target.tree else { return [] }
+        return FileTreeRow.visible(tree: tree, roots: target.visibleChildren.map(\.handle.nodeID), expanded: expanded)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("Name").frame(maxWidth: .infinity, alignment: .leading)
+                Text("% of parent").frame(width: 130, alignment: .leading)
                 Text("Type").frame(width: 90, alignment: .leading)
                 Text("Items").frame(width: 70, alignment: .trailing)
                 Text("Allocated").frame(width: 100, alignment: .trailing)
@@ -467,31 +502,85 @@ private struct FileListView: View {
 
             Divider()
 
-            List(target.visibleChildren, selection: Binding(
-                get: { target.selected?.id },
-                set: { id in target.select(target.visibleChildren.first(where: { $0.id == id })) }
-            )) { node in
-                FileRow(node: node)
-                    .tag(node.id)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { target.open(node) }
+            ScrollViewReader { proxy in
+                List(selection: Binding<NodeID?>(
+                    get: { target.selectedID },
+                    set: { target.selectedID = $0 }
+                )) {
+                    ForEach(rows) { row in
+                        if let tree = target.tree {
+                            let node = tree.metadata(for: row.id)
+                            FileRow(node: node, depth: row.depth, fraction: tree.fractionOfParent(row.id),
+                                    expanded: expanded.contains(row.id)) {
+                                if !expanded.insert(row.id).inserted { expanded.remove(row.id) }
+                            }
+                            .tag(row.id)
+                            .id(row.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture(count: 2) { target.open(node) }
+                        }
+                    }
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .onChange(of: target.selectedID, initial: true) { _, id in
+                    revealSelection(using: proxy)
+                }
+                .onChange(of: revealRequest) { _, _ in revealSelection(using: proxy) }
+                .onChange(of: target.tree?.generation) { _, _ in expanded.removeAll() }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
         }
     }
+
+    private func revealSelection(using proxy: ScrollViewProxy) {
+        guard let id = target.selectedID, let tree = target.tree else { return }
+        expanded.formUnion(tree.breadcrumbs(to: id).dropLast())
+        Task { @MainActor in
+            await Task.yield()
+            proxy.scrollTo(id, anchor: .center)
+        }
+    }
+
 }
 
 private struct FileRow: View {
     let node: NodeMetadata
+    let depth: Int
+    let fraction: Double
+    let expanded: Bool
+    let toggle: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 7) {
+                Color.clear.frame(width: CGFloat(depth) * 16, height: 1)
+                Button(action: toggle) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                .opacity(node.isDirectory ? 1 : 0)
+                .disabled(!node.isDirectory)
+                .accessibilityLabel(expanded ? "Collapse folder" : "Expand folder")
                 Image(systemName: node.isDirectory ? "folder.fill" : (node.isDuplicateReference ? "link" : "doc.fill"))
                     .foregroundStyle(FilePalette.color(for: node))
                 Text(node.name).lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 5) {
+                GeometryReader { geometry in
+                    Capsule().fill(Color.secondary.opacity(0.15))
+                    Capsule().fill(FilePalette.color(for: node))
+                        .frame(width: geometry.size.width * fraction)
+                }
+                .frame(height: 8)
+                Text(fraction.formatted(.percent.precision(.fractionLength(1))))
+                    .monospacedDigit()
+                    .font(.caption)
+                    .frame(width: 48, alignment: .trailing)
+            }
+            .frame(width: 130)
+            .accessibilityLabel("\(fraction.formatted(.percent)) of parent folder")
             Text(node.isDuplicateReference ? "Hard link" : node.fileExtension.capitalized)
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .leading)
@@ -506,22 +595,5 @@ private struct FileRow: View {
                 .frame(width: 130, alignment: .trailing)
         }
         .font(.callout)
-    }
-}
-
-private struct Metric: View {
-    let value: String
-    let label: String
-    var alignment: HorizontalAlignment = .center
-
-    var body: some View {
-        VStack(alignment: alignment, spacing: 2) {
-            Text(value)
-                .font(.system(.title3, design: .rounded, weight: .semibold))
-                .monospacedDigit()
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 }

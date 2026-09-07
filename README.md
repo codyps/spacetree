@@ -65,6 +65,8 @@ Then quit and reopen SpaceTree before scanning again.
 - Single-click a file tile or row: select it
 - Double-click a folder row: drill into it
 - Click a breadcrumb: navigate back up
+- **Back** (`⌘[`) and **Forward** (`⌘]`): revisit directories within the current report
+- **Up** (`⌘↑`): open the enclosing directory, stopping at the scan root
 - **Reveal**: show the selected item in Finder
 
 ### Mounted filesystems

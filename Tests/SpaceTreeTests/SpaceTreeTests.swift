@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 import SpaceTreeNative
@@ -90,7 +91,7 @@ import SpaceTreeNative
     }
 }
 
-@Test func treemapGroupsFilesInsideInvisibleDirectoryRegions() throws {
+@Test func treemapGroupsFilesBelowFolderHeaders() throws {
     let base = URL(fileURLWithPath: "/tmp/grouped-treemap", isDirectory: true)
     var builder = ScanTreeBuilder(rootName: "grouped-treemap", rootURL: base)
     let firstDirectory = builder.addNode(parent: builder.rootID, name: "first", kind: .directory, allocatedBytes: 0, logicalBytes: 0, modifiedAt: nil, identity: nil)
@@ -109,8 +110,26 @@ import SpaceTreeNative
     let firstSmallRect = try #require(scene.rect(for: firstSmall))
     let secondLargeRect = try #require(scene.rect(for: secondLarge))
     let secondSmallRect = try #require(scene.rect(for: secondSmall))
-    let firstBounds = firstLargeRect.union(firstSmallRect)
-    let secondBounds = secondLargeRect.union(secondSmallRect)
+    let firstBounds = try #require(scene.rect(for: firstDirectory))
+    let secondBounds = try #require(scene.rect(for: secondDirectory))
+    #expect(firstBounds.contains(firstLargeRect))
+    #expect(firstBounds.contains(firstSmallRect))
+    #expect(secondBounds.contains(secondLargeRect))
+    #expect(secondBounds.contains(secondSmallRect))
+    for folder in scene.folders {
+        let header = try #require(folder.header)
+        #expect(scene.hit(at: CGPoint(x: header.midX, y: header.midY))?.entry.nodeID == folder.nodeID)
+        if let parent = tree.parent(of: folder.nodeID), let parentFolder = scene.folders.first(where: { $0.nodeID == parent }) {
+            #expect(parentFolder.header != nil)
+            #expect(parentFolder.rect.contains(folder.rect))
+        }
+    }
+    let collapsed = FileTreeRow.visible(tree: tree, roots: [firstDirectory], expanded: [])
+    #expect(collapsed.map(\.id) == [firstDirectory])
+    let expanded = FileTreeRow.visible(tree: tree, roots: [firstDirectory], expanded: Set(tree.breadcrumbs(to: firstSmall).dropLast()))
+    #expect(expanded.map(\.id).contains(firstSmall))
+    #expect(expanded.first(where: { $0.id == firstSmall })?.depth == 2)
+    #expect(abs(tree.fractionOfParent(firstSmall) - 0.2) < 0.0001)
 
     #expect(scene.tiles.count == 4)
     #expect(!scene.entries.contains { $0.nodeID == firstDirectory || $0.nodeID == nestedDirectory || $0.nodeID == secondDirectory })
@@ -524,4 +543,79 @@ private func waitForScan(_ target: ScanTarget) async throws {
 
 private func childMetadata(_ tree: ScanTree, _ nodeID: NodeID) -> [NodeMetadata] {
     tree.children(of: nodeID).map { tree.metadata(for: $0) }
+}
+
+@Test func scannerReportsFinishingBeforeCompletion() async throws {
+    actor Updates {
+        var values: [ScanProgress] = []
+        func append(_ value: ScanProgress) { values.append(value) }
+    }
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data([1, 2, 3]).write(to: directory.appendingPathComponent("file"))
+    let updates = Updates()
+    let tree = try await DiskScanner.scan(url: directory) { await updates.append($0) }
+    let values = await updates.values
+    let finishing = values.compactMap(\.finishing)
+    #expect(finishing.map(\.stage).contains("Resolving hard links"))
+    #expect(finishing.map(\.stage).contains("Calculating directory sizes"))
+    #expect(finishing.last?.stage == "Sorting entries")
+    #expect(finishing.last?.completed == finishing.last?.total)
+    #expect(values.last?.finishing == nil)
+    #expect(values.last?.itemCount == tree.nodeCount)
+    try tree.validate()
+}
+
+@Test @MainActor func scanStatisticsCaptureWorkAndSurviveSnapshots() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data([1, 2, 3]).write(to: directory.appendingPathComponent("file"))
+    let target = ScanTarget(id: "statistics", url: directory, name: "Stats", kind: .folder, persistResults: false)
+    target.scan()
+    try await waitForScan(target)
+    let stats = try #require(target.scanStatistics)
+    #expect(stats.outcome == "complete")
+    #expect(stats.enumeratedDirectories == 1)
+    #expect(stats.enumeratedEntries == 1)
+    #expect(stats.itemCount == 2)
+    #expect(stats.slowestDirectories.first?.path == directory.path)
+    #expect(stats.phases.contains { $0.name == "Enumerating directories" })
+    #expect(stats.phases.contains { $0.name == "Sorting entries" })
+    #expect(abs(stats.phases.reduce(0) { $0 + $1.durationSeconds } - stats.durationSeconds) < 0.01)
+    let tree = try #require(target.tree)
+    let snapshot = ScanSnapshot(version: ScanSnapshot.currentVersion, targetID: target.id,
+        tree: tree, progress: target.progress, scannedAt: Date(), scanDuration: stats.durationSeconds,
+        fseventID: 0, statistics: stats)
+    let restored = try SnapshotStore.decode(SnapshotStore.encode(snapshot))
+    #expect(restored.statistics == stats)
+    let json = try #require(JSONSerialization.jsonObject(with: stats.jsonData()) as? [String: Any])
+    #expect(json["schemaVersion"] as? Int == 1)
+    #expect(json["outcome"] as? String == "complete")
+    let historyDirectory = directory.appendingPathComponent("history")
+    let store = ScanStatisticsStore(directory: historyDirectory)
+    try await store.save(stats)
+    let saved = try Data(contentsOf: historyDirectory.appendingPathComponent("\(stats.id).json"))
+    #expect(saved == (try stats.jsonData()))
+
+    // Version 2 ended immediately after the tree, without a statistics section.
+    var legacySnapshot = snapshot
+    legacySnapshot.statistics = nil
+    var legacy = try SnapshotStore.encode(legacySnapshot)
+    legacy.removeLast(32 + 4 + 4) // SHA256, length prefix, JSON null
+    legacy[8] = 2
+    legacy.append(contentsOf: SHA256.hash(data: legacy))
+    let decodedLegacy = try SnapshotStore.decode(legacy)
+    #expect(decodedLegacy.tree == tree)
+    #expect(decodedLegacy.statistics == nil)
+}
+
+@Test func cancelledStatisticsFreezeAndCannotFinishTwice() throws {
+    let recorder = ScanStatisticsRecorder(targetID: "cancel", roots: ["/tmp"], mode: "full")
+    let progress = ScanProgress(currentPath: "/tmp", itemCount: 1, bytesFound: 0, unreadableCount: 0)
+    let record = try #require(recorder.finish(outcome: "cancelled", progress: progress))
+    recorder.directory(path: "/tmp", duration: .seconds(1), entries: 100)
+    #expect(record.enumeratedEntries == 0)
+    #expect(recorder.finish(outcome: "complete", progress: progress) == nil)
 }

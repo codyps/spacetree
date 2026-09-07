@@ -12,7 +12,8 @@ let package = Package(
         .executableTarget(
             name: "SpaceTree",
             dependencies: ["SpaceTreeNative"],
-            path: "Sources/SpaceTree"
+            path: "Sources/SpaceTree",
+            resources: [.process("Resources")]
         ),
         .target(
             name: "SpaceTreeNative",

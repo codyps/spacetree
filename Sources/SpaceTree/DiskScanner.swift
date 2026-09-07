@@ -8,6 +8,7 @@ struct ScanProgress: Codable, Equatable, Sendable {
     var bytesFound: Int64
     var unreadableCount: Int
     var duplicateReferenceCount: Int = 0
+    var finishing: ScanTreeBuilder.FinishingProgress? = nil
 }
 
 struct ScanRoot: Codable, Equatable, Sendable {
@@ -104,6 +105,7 @@ enum DiskScanner {
 
     static func scan(
         url: URL,
+        statistics: ScanStatisticsRecorder? = nil,
         progress: @escaping @Sendable (ScanProgress) async -> Void
     ) async throws -> ScanTree {
         let root = url.standardizedFileURL
@@ -112,6 +114,7 @@ enum DiskScanner {
             roots: [ScanRoot(url: root, name: name)],
             displayName: name,
             identifier: root.path,
+            statistics: statistics,
             progress: progress
         )
     }
@@ -120,6 +123,7 @@ enum DiskScanner {
         root existingRoot: ScanTree,
         changedPaths: [String],
         scanRoots: [ScanRoot],
+        statistics: ScanStatisticsRecorder? = nil,
         progress: @escaping @Sendable (ScanProgress) async -> Void
     ) async throws -> ScanTree {
         guard !changedPaths.isEmpty else { return existingRoot }
@@ -138,25 +142,27 @@ enum DiskScanner {
 
         var replacements: [String: ScanTree] = [:]
         for path in coalesced {
-            let replacement = try await scan(url: URL(fileURLWithPath: path, isDirectory: true), progress: progress)
+            let replacement = try await scan(url: URL(fileURLWithPath: path, isDirectory: true), statistics: statistics, progress: progress)
             if replacement.hardLinkReferenceCount > 0 {
                 let name = existingRoot.metadata(for: existingRoot.rootID).name
                 return try await scan(
                     roots: scanRoots,
                     displayName: name,
                     identifier: existingRoot.displayURL.absoluteString,
+                    statistics: statistics,
                     progress: progress
                 )
             }
             replacements[path] = replacement
         }
-        return try rebuild(existingRoot, replacing: replacements)
+        return try await rebuild(existingRoot, replacing: replacements, statistics: statistics, progress: progress)
     }
 
     static func scan(
         roots: [ScanRoot],
         displayName: String,
         identifier: String,
+        statistics: ScanStatisticsRecorder? = nil,
         progress: @escaping @Sendable (ScanProgress) async -> Void
     ) async throws -> ScanTree {
         guard !roots.isEmpty else { throw CocoaError(.fileReadNoSuchFile) }
@@ -188,6 +194,7 @@ enum DiskScanner {
                 pending.append(DirectoryWork(url: root.url, nodeID: nodeID, rootDevice: metadata.device))
             }
 
+            statistics?.beginPhase("Enumerating directories")
             var seenIdentities = Set<FileIdentity>()
             var state = ScanProgress(
                 currentPath: standardizedRoots[0].url.path,
@@ -206,7 +213,9 @@ enum DiskScanner {
                         group.addTask {
                             try Task.checkCancellation()
                             await enumerationLimiter.acquire()
+                            let started = ContinuousClock.now
                             let result = enumerate(work)
+                            statistics?.directory(path: work.url.path, duration: started.duration(to: .now), entries: result.entries.count)
                             await enumerationLimiter.release()
                             return result
                         }
@@ -260,7 +269,7 @@ enum DiskScanner {
                 }
             }
 
-            let tree = try builder.finalize()
+            let tree = try await finalize(&builder, state: state, statistics: statistics, progress: progress)
             let root = tree.metadata(for: tree.rootID)
             state.itemCount = root.fileCount + root.directoryCount
             state.bytesFound = root.allocatedBytes
@@ -342,7 +351,43 @@ enum DiskScanner {
         return (UInt64(metadata.st_dev), UInt64(metadata.st_ino))
     }
 
-    private static func rebuild(_ existing: ScanTree, replacing replacements: [String: ScanTree]) throws -> ScanTree {
+    private static func finalize(
+        _ builder: inout ScanTreeBuilder,
+        state: ScanProgress,
+        statistics: ScanStatisticsRecorder? = nil,
+        progress: @escaping @Sendable (ScanProgress) async -> Void
+    ) async throws -> ScanTree {
+        let (updates, continuation) = AsyncStream<ScanTreeBuilder.FinishingProgress>.makeStream()
+        let reporter = Task {
+            for await finishing in updates {
+                var update = state
+                update.finishing = finishing
+                await progress(update)
+            }
+        }
+        do {
+            let tree = try builder.finalize {
+                statistics?.beginPhase($0.stage)
+                continuation.yield($0)
+            }
+            statistics?.beginPhase("Publishing results")
+            continuation.finish()
+            await reporter.value
+            return tree
+        } catch {
+            continuation.finish()
+            await reporter.value
+            throw error
+        }
+    }
+
+    private static func rebuild(
+        _ existing: ScanTree,
+        replacing replacements: [String: ScanTree],
+        statistics: ScanStatisticsRecorder? = nil,
+        progress: @escaping @Sendable (ScanProgress) async -> Void
+    ) async throws -> ScanTree {
+        statistics?.beginPhase("Rebuilding changed tree")
         let rootMetadata = existing.metadata(for: existing.rootID)
         let synthetic = existing.kind(of: existing.rootID) == .syntheticRoot
         var builder = ScanTreeBuilder(
@@ -406,7 +451,12 @@ enum DiskScanner {
         } else {
             copyContents(from: existing, sourceParent: existing.rootID, to: builder.rootID, builder: &builder)
         }
-        return try builder.finalize()
+        return try await finalize(&builder, state: ScanProgress(
+            currentPath: existing.displayURL.path,
+            itemCount: builder.nodes.count,
+            bytesFound: rootMetadata.allocatedBytes,
+            unreadableCount: existing.unreadableCount
+        ), statistics: statistics, progress: progress)
     }
 }
 

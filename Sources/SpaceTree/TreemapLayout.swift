@@ -116,6 +116,17 @@ struct TreemapScene: Sendable {
         let rect: CGRect
     }
 
+    struct Folder: Sendable {
+        let nodeID: NodeID
+        let rect: CGRect
+        let header: CGRect?
+    }
+
+    let folders: [Folder]
+    let labeledFolders: [Folder]
+    let regionRects: [NodeID: CGRect]
+    let lightEdges: Path
+    let darkEdges: Path
     let tree: ScanTree
     let entries: [Entry]
     let tiles: [Tile]
@@ -125,6 +136,8 @@ struct TreemapScene: Sendable {
     private let hitIndex: TreemapHitIndex
 
     static func build(tree: ScanTree, nodes: [NodeID], in bounds: CGRect) -> TreemapScene {
+        var folders: [Folder] = []
+        var regionRects: [NodeID: CGRect] = [:]
         var entries: [Entry] = []
         var tiles: [Tile] = []
         let estimatedFileCount = nodes.reduce(0) { $0 + tree.fileCount(of: $1) }
@@ -133,12 +146,18 @@ struct TreemapScene: Sendable {
 
         var pending = Array(arrangedNodes(tree: tree, nodes: nodes, in: bounds).reversed())
         while let region = pending.popLast() {
+            regionRects[region.nodeID] = region.rect
             let kind = tree.kind(of: region.nodeID)
             if kind == .directory || kind == .syntheticRoot {
+                let header = region.rect.width >= 48 && region.rect.height >= 40
+                    ? CGRect(x: region.rect.minX, y: region.rect.minY, width: region.rect.width, height: 20) : nil
+                folders.append(Folder(nodeID: region.nodeID, rect: region.rect, header: header))
+                let content = CGRect(x: region.rect.minX, y: region.rect.minY + (header?.height ?? 0),
+                                     width: region.rect.width, height: region.rect.height - (header?.height ?? 0))
                 pending.append(contentsOf: arrangedNodes(
                     tree: tree,
                     nodes: tree.children(of: region.nodeID),
-                    in: region.rect
+                    in: content
                 ).reversed())
                 continue
             }
@@ -154,15 +173,29 @@ struct TreemapScene: Sendable {
 
         var fillPaths = FileCategory.allCases.map { _ in Path() }
         var labeledTileIndices: [Int] = []
+        var lightEdges = Path()
+        var darkEdges = Path()
         for (tileIndex, tile) in tiles.enumerated() {
-            let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
-            let rect = tile.rect.insetBy(dx: gap, dy: gap)
+            let rect = tile.rect
+            if rect.width >= 3 && rect.height >= 3 {
+                lightEdges.move(to: CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5))
+                lightEdges.addLine(to: CGPoint(x: rect.minX + 0.5, y: rect.minY + 0.5))
+                lightEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
+                darkEdges.move(to: CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5))
+                darkEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.maxY - 0.5))
+                darkEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
+            }
             fillPaths[Int(entries[tile.entryIndex].category.rawValue)].addRect(rect)
             if rect.width >= 78, rect.height >= 34 {
                 labeledTileIndices.append(tileIndex)
             }
         }
         return TreemapScene(
+            folders: folders,
+            labeledFolders: folders.filter { $0.header != nil },
+            regionRects: regionRects,
+            lightEdges: lightEdges,
+            darkEdges: darkEdges,
             tree: tree,
             entries: entries,
             tiles: tiles,
@@ -205,14 +238,16 @@ struct TreemapScene: Sendable {
     }
 
     func hit(at point: CGPoint) -> Hit? {
+        if let folder = labeledFolders.first(where: { $0.header?.contains(point) == true }) {
+            return Hit(entry: Entry(nodeID: folder.nodeID, allocatedBytes: tree.allocatedBytes(of: folder.nodeID), category: FilePalette.category(forExtension: "Folder")), rect: folder.rect)
+        }
         guard let tileIndex = hitIndex.tileIndex(at: point, tiles: tiles) else { return nil }
         let tile = tiles[tileIndex]
         return Hit(entry: entries[tile.entryIndex], rect: tile.rect)
     }
 
     func rect(for nodeID: NodeID) -> CGRect? {
-        guard let tile = tiles.first(where: { entries[$0.entryIndex].nodeID == nodeID }) else { return nil }
-        return tile.rect
+        regionRects[nodeID]
     }
 }
 

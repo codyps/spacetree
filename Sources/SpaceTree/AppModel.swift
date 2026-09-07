@@ -33,12 +33,26 @@ final class ScanTarget: Identifiable {
     let persistResults: Bool
     var state: State = .idle
     var progress: ScanProgress
-    var tree: ScanTree?
+    var tree: ScanTree? {
+        didSet {
+            guard tree?.generation != oldValue?.generation else { return }
+            backHistory.removeAll()
+            forwardHistory.removeAll()
+            currentID = tree?.rootID
+            selectedID = nil
+            searchText = ""
+        }
+    }
     var currentID: NodeID?
+    private var backHistory: [NodeID] = []
+    private var forwardHistory: [NodeID] = []
     var selectedID: NodeID?
     var searchText = ""
     var scannedAt: Date?
     var scanDuration: TimeInterval?
+    var scanStatistics: ScanStatistics?
+    var statisticsSaveError: String?
+    @ObservationIgnored private var statisticsRecorder: ScanStatisticsRecorder?
     var hasFilesystemChanges = false
     var changedPathCount = 0
     var changeTrackingAvailable = false
@@ -145,6 +159,7 @@ final class ScanTarget: Identifiable {
     }
 
     func scan() {
+        endStatistics(outcome: "cancelled")
         task?.cancel()
         changeMonitor?.stop()
         changeMonitor = nil
@@ -152,6 +167,8 @@ final class ScanTarget: Identifiable {
         generation = UUID()
         let thisGeneration = generation
         let scanStartedAt = Date()
+        let recorder = ScanStatisticsRecorder(targetID: id, roots: roots.map(\.url.path), mode: "full")
+        statisticsRecorder = recorder
         let startingEventID = UInt64(FSEventsGetCurrentEventId())
         tree = nil
         currentID = nil
@@ -170,7 +187,8 @@ final class ScanTarget: Identifiable {
                 let result = try await DiskScanner.scan(
                     roots: roots,
                     displayName: name,
-                    identifier: id
+                    identifier: id,
+                    statistics: recorder
                 ) { [weak self] update in
                     await MainActor.run {
                         guard let self, self.generation == thisGeneration else { return }
@@ -181,10 +199,12 @@ final class ScanTarget: Identifiable {
                 finishScan(result, startedAt: scanStartedAt, eventID: startingEventID)
             } catch is CancellationError {
                 guard generation == thisGeneration else { return }
+                endStatistics(outcome: "cancelled")
                 state = .idle
                 task = nil
             } catch {
                 guard generation == thisGeneration else { return }
+                endStatistics(outcome: "failed", error: error.localizedDescription)
                 state = .failed(error.localizedDescription)
                 task = nil
             }
@@ -193,6 +213,7 @@ final class ScanTarget: Identifiable {
 
     func cancel() {
         guard state == .scanning else { return }
+        endStatistics(outcome: "cancelled")
         generation = UUID()
         task?.cancel()
         task = nil
@@ -233,19 +254,52 @@ final class ScanTarget: Identifiable {
             progress = snapshot.progress
             scannedAt = snapshot.scannedAt
             scanDuration = snapshot.scanDuration
+            scanStatistics = snapshot.statistics
             state = .complete
             startChangeTracking(since: snapshot.fseventID)
         }
     }
 
     func open(_ node: NodeMetadata) {
+        guard let tree, tree.contains(node.handle) else { return }
         if node.isDirectory {
-            currentID = node.handle.nodeID
-            selectedID = nil
-            searchText = ""
+            guard currentID != node.handle.nodeID else { return }
+            if let currentID { backHistory.append(currentID) }
+            forwardHistory.removeAll()
+            navigate(to: node.handle.nodeID)
         } else {
             selectedID = node.handle.nodeID
         }
+    }
+
+    var canGoBack: Bool { !backHistory.isEmpty }
+    var canGoForward: Bool { !forwardHistory.isEmpty }
+    var canGoUp: Bool {
+        guard let tree, let currentID else { return false }
+        return tree.parent(of: currentID) != nil
+    }
+
+    func goBack() {
+        guard let destination = backHistory.popLast(), let currentID else { return }
+        forwardHistory.append(currentID)
+        navigate(to: destination)
+    }
+
+    func goForward() {
+        guard let destination = forwardHistory.popLast(), let currentID else { return }
+        backHistory.append(currentID)
+        navigate(to: destination)
+    }
+
+    func goUp() {
+        guard let tree, let currentID, let parent = tree.parent(of: currentID) else { return }
+        open(tree.metadata(for: parent))
+    }
+
+    private func navigate(to destination: NodeID) {
+        currentID = destination
+        selectedID = nil
+        searchText = ""
     }
 
     func select(_ node: NodeMetadata?) {
@@ -274,6 +328,7 @@ final class ScanTarget: Identifiable {
 
     private func incrementalScan() {
         guard let existingTree = tree else { scan(); return }
+        endStatistics(outcome: "cancelled")
         task?.cancel()
         changeMonitor?.stop()
         changeMonitor = nil
@@ -281,6 +336,8 @@ final class ScanTarget: Identifiable {
         generation = UUID()
         let thisGeneration = generation
         let scanStartedAt = Date()
+        let recorder = ScanStatisticsRecorder(targetID: id, roots: roots.map(\.url.path), mode: "incremental")
+        statisticsRecorder = recorder
         let startingEventID = UInt64(FSEventsGetCurrentEventId())
         let paths = Array(changedPaths)
         state = .scanning
@@ -292,7 +349,8 @@ final class ScanTarget: Identifiable {
                 let result = try await DiskScanner.refresh(
                     root: existingTree,
                     changedPaths: paths,
-                    scanRoots: roots
+                    scanRoots: roots,
+                    statistics: recorder
                 ) { [weak self] update in
                     await MainActor.run {
                         guard let self, self.generation == thisGeneration else { return }
@@ -303,12 +361,28 @@ final class ScanTarget: Identifiable {
                 finishScan(result, startedAt: scanStartedAt, eventID: startingEventID)
             } catch is CancellationError {
                 guard generation == thisGeneration else { return }
+                endStatistics(outcome: "cancelled")
                 state = .complete
                 task = nil
             } catch {
                 guard generation == thisGeneration else { return }
+                endStatistics(outcome: "failed", error: error.localizedDescription)
                 state = .failed(error.localizedDescription)
                 task = nil
+            }
+        }
+    }
+
+    private func endStatistics(outcome: String, result: ScanTree? = nil, error: String? = nil) {
+        guard let recorder = statisticsRecorder else { return }
+        statisticsRecorder = nil
+        guard let record = recorder.finish(outcome: outcome, progress: progress, tree: result, error: error) else { return }
+        scanStatistics = record
+        statisticsSaveError = nil
+        if persistResults {
+            Task {
+                do { try await ScanStatisticsStore.shared.save(record) }
+                catch { statisticsSaveError = error.localizedDescription }
             }
         }
     }
@@ -331,6 +405,7 @@ final class ScanTarget: Identifiable {
         changedPathCount = 0
         changedPaths.removeAll()
         requiresFullRescan = false
+        endStatistics(outcome: "complete", result: result)
         state = .complete
         task = nil
         startChangeTracking(since: eventID)
@@ -341,7 +416,8 @@ final class ScanTarget: Identifiable {
             progress: progress,
             scannedAt: scannedAt ?? Date(),
             scanDuration: scanDuration ?? 0,
-            fseventID: eventID
+            fseventID: eventID,
+            statistics: scanStatistics
         )
         if persistResults { Task { await SnapshotStore.save(snapshot) } }
     }

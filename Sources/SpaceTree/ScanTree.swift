@@ -553,13 +553,32 @@ struct ScanTreeBuilder {
         }
     }
 
-    mutating func finalize(generation: TreeGeneration = TreeGeneration()) throws -> ScanTree {
+    struct FinishingProgress: Codable, Equatable, Sendable {
+        var stage: String
+        var completed: Int
+        var total: Int
+    }
+
+    mutating func finalize(
+        generation: TreeGeneration = TreeGeneration(),
+        progress: (FinishingProgress) -> Void = { _ in }
+    ) throws -> ScanTree {
+        var lastUpdate = ContinuousClock.now
+        func report(_ stage: String, _ completed: Int, _ total: Int) {
+            guard completed == 0 || completed == total || completed % 1_024 == 0 else { return }
+            let now = ContinuousClock.now
+            guard completed == 0 || completed == total || lastUpdate.duration(to: now) >= .milliseconds(120) else { return }
+            lastUpdate = now
+            progress(FinishingProgress(stage: stage, completed: completed, total: total))
+        }
+        report("Resolving hard links", 0, identityMembers.count)
         var groups: [HardLinkGroup] = []
         var members: [NodeID] = []
         let hardLinkIdentities = identityMembers.keys.sorted {
             $0.device == $1.device ? $0.inode < $1.inode : $0.device < $1.device
         }
-        for identity in hardLinkIdentities {
+        for (offset, identity) in hardLinkIdentities.enumerated() {
+            report("Resolving hard links", offset, hardLinkIdentities.count)
             guard let groupMembers = identityMembers[identity], groupMembers.count > 1 else { continue }
             let ordered = groupMembers.sorted { pathSortKey(of: $0) < pathSortKey(of: $1) }
             let canonical = ordered[0]
@@ -583,7 +602,9 @@ struct ScanTreeBuilder {
             }
         }
 
+        report("Preparing totals", 0, nodes.count)
         for index in nodes.indices {
+            report("Preparing totals", index, nodes.count)
             let kind = nodes[index].flags.kind
             nodes[index].recursiveFileCount = kind == .directory || kind == .syntheticRoot ? 0 : 1
             nodes[index].recursiveDirectoryCount = kind == .directory || kind == .syntheticRoot ? 1 : 0
@@ -594,8 +615,10 @@ struct ScanTreeBuilder {
             }
         }
 
+        report("Calculating directory sizes", 0, nodes.count)
         if nodes.count > 1 {
             for rawIndex in stride(from: nodes.count - 1, through: 1, by: -1) {
+                report("Calculating directory sizes", nodes.count - rawIndex, nodes.count)
                 let child = nodes[rawIndex]
                 let parentIndex = Int(child.parent.rawValue)
                 nodes[parentIndex].allocatedBytes = saturatingAdd(
@@ -612,10 +635,13 @@ struct ScanTreeBuilder {
             }
         }
 
+        report("Sorting entries", 0, nodes.count)
         for rawIndex in nodes.indices {
+            report("Sorting entries", rawIndex, nodes.count)
             sortChildren(of: NodeID(rawValue: UInt32(rawIndex)))
         }
 
+        report("Sorting entries", nodes.count, nodes.count)
         roots.sort { $0.nodeID < $1.nodeID }
         let tree = ScanTree(
             generation: generation,

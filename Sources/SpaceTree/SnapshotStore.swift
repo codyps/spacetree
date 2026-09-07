@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 struct ScanSnapshot: Sendable {
-    static let currentVersion = 2
+    static let currentVersion = 3
 
     let version: Int
     let targetID: String
@@ -11,6 +11,7 @@ struct ScanSnapshot: Sendable {
     let scannedAt: Date
     let scanDuration: TimeInterval
     let fseventID: UInt64
+    var statistics: ScanStatistics? = nil
 }
 
 enum SnapshotFormatError: Error {
@@ -33,7 +34,7 @@ enum SnapshotStore {
             let url = snapshotURL(for: targetID)
             guard let data = try? Data(contentsOf: url),
                   let snapshot = try? decode(data),
-                  snapshot.version == ScanSnapshot.currentVersion,
+
                   snapshot.targetID == targetID else { return nil }
             return snapshot
         }.value
@@ -108,6 +109,9 @@ enum SnapshotStore {
         }
         for member in tree.hardLinkMembers { writer.append(member.rawValue) }
 
+        let statisticsData = try JSONEncoder().encode(snapshot.statistics)
+        try writer.append(count: statisticsData.count)
+        writer.append(bytes: Array(statisticsData))
         let checksum = SHA256.hash(data: writer.data)
         writer.data.append(contentsOf: checksum)
         return writer.data
@@ -123,7 +127,7 @@ enum SnapshotStore {
         var reader = BinaryReader(data: Data(payload))
         guard try reader.readBytes(count: signature.count) == signature else { throw SnapshotFormatError.invalidSignature }
         let version = Int(try reader.readUInt32())
-        guard version == ScanSnapshot.currentVersion else { throw SnapshotFormatError.unsupportedVersion }
+        guard version == 2 || version == ScanSnapshot.currentVersion else { throw SnapshotFormatError.unsupportedVersion }
         let targetID = try reader.readString()
         let scannedAt = Date(timeIntervalSince1970: Double(bitPattern: try reader.readUInt64()))
         let duration = Double(bitPattern: try reader.readUInt64())
@@ -210,6 +214,11 @@ enum SnapshotStore {
         var members: [NodeID] = []
         members.reserveCapacity(memberCount)
         for _ in 0..<memberCount { members.append(NodeID(rawValue: try reader.readUInt32())) }
+        var statistics: ScanStatistics?
+        if version >= 3 {
+            let count = try reader.readCount(maximum: 1_048_576)
+            statistics = try JSONDecoder().decode(ScanStatistics?.self, from: Data(reader.readBytes(count: count)))
+        }
         guard reader.isAtEnd else { throw SnapshotFormatError.trailingBytes }
 
         let tree = ScanTree(
@@ -225,13 +234,14 @@ enum SnapshotStore {
         )
         try tree.validate()
         return ScanSnapshot(
-            version: version,
+            version: ScanSnapshot.currentVersion,
             targetID: targetID,
             tree: tree,
             progress: progress,
             scannedAt: scannedAt,
             scanDuration: duration,
-            fseventID: eventID
+            fseventID: eventID,
+            statistics: statistics
         )
     }
 
