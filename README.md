@@ -8,7 +8,7 @@ SpaceTree is a native macOS disk space analyzer inspired by WizTree. It discover
 ## Features
 
 - Native SwiftUI interface with no third-party dependencies
-- Squarified, proportional treemap with a separate hoverable tile for every file, spatially grouped by directory
+- Squarified, proportional treemap grouped by directory; tiny files are aggregated in the overview, with full detail available by opening folders or browsing the file tree
 - Background treemap layout and asynchronous Canvas rendering keep the interface responsive
 - Double-click folder drill-down with breadcrumb navigation
 - File/folder detail list, search, and Finder reveal
@@ -80,6 +80,12 @@ Then quit and reopen SpaceTree before scanning again.
 SpaceTree uses the native mount table and I/O Registry directly; it does not invoke `diskutil`. Mounted APFS filesystems that share an `AppleAPFSContainer` UUID—such as the startup System, Data, VM, Preboot, Nix, and development volumes—are combined into one scan target. External APFS containers and non-APFS filesystems remain separate. Time Machine backup volumes, mounted snapshots, disk images, and developer simulator/low-level system mounts are excluded by default from the dashboard and "Scan All", but can be enabled on demand with the dashboard's **Time Machine**, **Disk images**, and **Developer/system** checkboxes.
 
 Container scans coalesce overlapping roots and track directory device/inode identities before scheduling enumeration. This prevents macOS firmlink aliases such as `/Users` and `/System/Volumes/Data/Users` from being traversed twice. Distinct mounted filesystems remain separate scan roots, and enumeration stops at device boundaries.
+
+### Treemap performance
+
+The overview generates at most 16,384 regions, grouping detail below four physical pixels of area. Groups preserve file counts and allocated byte totals. Hover shows the grouped count; double-click opens the folder when available. The file tree always retains individual files. Group menus offer folder navigation, rather than file mutation actions.
+
+Layout jobs are cancelled and joined before their replacements start, and window resizing is coalesced for 120 ms while the previous image remains visible. Tiles draw directly into a bitmap capped at 16 megapixels; the fallback also uses the bounded tile set.
 
 ### Scan performance
 

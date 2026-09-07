@@ -276,6 +276,19 @@ struct ScanTree: Codable, Equatable, Sendable {
         return value == .null ? nil : value
     }
 
+    // Restartable sibling traversal without allocating an array for huge folders.
+    func childIDs(of nodeID: NodeID) -> AnySequence<NodeID> {
+        AnySequence {
+            var child = nodes[index(of: nodeID)].firstChild
+            return AnyIterator<NodeID> {
+                guard child != .null else { return nil }
+                let result = child
+                child = nodes[index(of: child)].nextSibling
+                return result
+            }
+        }
+    }
+
     func children(of nodeID: NodeID) -> [NodeID] {
         var result: [NodeID] = []
         var child = nodes[index(of: nodeID)].firstChild

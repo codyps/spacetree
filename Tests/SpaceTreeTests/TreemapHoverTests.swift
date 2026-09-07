@@ -30,7 +30,7 @@ import Testing
                             allocatedBytes: 100, logicalBytes: 100, modifiedAt: nil, identity: nil)
     }
     let tree = try builder.finalize()
-    let scene = TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: CGRect(x: 0, y: 0, width: 800, height: 500))
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: CGRect(x: 0, y: 0, width: 800, height: 500))
     let hover = TreemapHoverState()
     for tile in scene.tiles {
         hover.update(at: CGPoint(x: tile.rect.midX, y: tile.rect.midY), in: scene)
@@ -65,7 +65,7 @@ import Testing
                                 allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
         }
         let tree = try builder.finalize()
-        let scene = TreemapScene.build(tree: tree, nodes: [parent], in: CGRect(x: 0, y: 0, width: 1_200, height: 800))
+        let scene = try TreemapScene.build(tree: tree, nodes: [parent], in: CGRect(x: 0, y: 0, width: 1_200, height: 800))
         let hover = TreemapHoverState()
         var samples: [Double] = []
         // Sample tiny tiles as well as visible ones, stressing crowded hit buckets.

@@ -107,7 +107,7 @@ struct FileInteractionTests {
     @Test func mapContextMenuUsesClickLocationWithoutPriorHover() throws {
         let (target, _, file, sibling) = try fixture()
         let tree = try #require(target.tree)
-        let scene = TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
+        let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
             in: CGRect(x: 0, y: 0, width: 600, height: 300), displayScale: 1)
         let view = MapInputView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
         view.scene = scene
@@ -121,6 +121,21 @@ struct FileInteractionTests {
         #expect(menu.items.first?.isEnabled == true)
         let blankMenu = try #require(view.menu(for: click(view, at: NSPoint(x: -10, y: -10))))
         #expect(blankMenu.items.first?.isEnabled == false)
+    }
+
+    @Test func aggregateMenuOffersOnlyFolderNavigation() throws {
+        let (target, folder, _, _) = try fixture()
+        let tree = try #require(target.tree)
+        // A tiny viewport forces grouping without manufacturing scene entries.
+        let scene = try TreemapScene.build(tree: tree, nodes: [folder],
+            in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        let view = MapInputView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        view.scene = scene
+        view.target = target
+        view.onSelect = { target.select($0) }
+        let menu = try #require(view.menu(for: click(view, at: NSPoint(x: 0.5, y: 0.5))))
+        #expect(target.selectedID == folder)
+        #expect(menu.items.map(\.title) == ["Open Containing Folder"])
     }
 
     @Test func arrowKeysExpandAndCollapseTheNativeHierarchy() throws {

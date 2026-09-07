@@ -12,6 +12,9 @@ struct TreemapView: View {
     @State private var hover = TreemapHoverState()
     @State private var selectedRect: CGRect?
     @State private var isPreparing = false
+    @State private var activeRequest = UUID()
+    @State private var buildOwner = UUID()
+    @State private var buildProgress = TreemapScene.BuildProgress(stage: "Laying out tree…")
 
     var body: some View {
         VStack(spacing: 4) {
@@ -29,15 +32,27 @@ struct TreemapView: View {
                             if let location { hover.update(at: location, in: scene) }
                             else { hover.clear() }
                         }
+                        .allowsHitTesting(!isPreparing)
                         .onChange(of: selectedID) { _, newValue in
                             selectedRect = newValue.flatMap { scene.rect(for: $0) }
                         }
-                    } else if isPreparing {
+                    }
+                    if isPreparing {
                         VStack(spacing: 8) {
-                            ProgressView()
-                            Text("Laying out every file…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            ProgressView(value: buildProgress.fraction) {
+                                Text(buildProgress.stage)
+                            } currentValueLabel: {
+                                if let total = buildProgress.total {
+                                    Text("\(buildProgress.completed.formatted()) of \(total.formatted()) files")
+                                        .monospacedDigit()
+                                }
+                            }
+                            .progressViewStyle(.linear)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: 280)
+                            .padding(16)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                         }
                     }
                 }
@@ -49,26 +64,47 @@ struct TreemapView: View {
             TreemapHoverPath(hover: hover)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Disk usage treemap showing every file")
+        .accessibilityLabel("Disk usage treemap. Small files are grouped; open folders for detail.")
     }
 
     @MainActor
     private func prepareScene(in bounds: CGRect) async {
-        guard bounds.width > 0, bounds.height > 0 else { return }
+        guard bounds.width > 0, bounds.height > 0, !Task.isCancelled else { return }
+        let requestID = UUID()
+        activeRequest = requestID
+        buildProgress = TreemapScene.BuildProgress(stage: "Laying out tree…", total: 0)
         isPreparing = true
-        scene = nil
         hover.clear()
         selectedRect = nil
-        let inputTree = tree
-        let inputNodes = nodeIDs
-        let scale = displayScale
-        let prepared = await Task.detached(priority: .userInitiated) {
-            TreemapScene.build(tree: inputTree, nodes: inputNodes, in: bounds, displayScale: scale)
-        }.value
-        guard !Task.isCancelled else { return }
-        scene = prepared
-        selectedRect = selectedID.flatMap { prepared.rect(for: $0) }
-        isPreparing = false
+        let inputTree = tree, inputNodes = nodeIDs, scale = displayScale
+        let (updates, continuation) = AsyncStream<TreemapScene.BuildProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let request = Task {
+            defer { continuation.finish() }
+            // Coalesce live resize changes before allocating a new scene.
+            try await Task.sleep(for: .milliseconds(120))
+            return try await TreemapBuildCoordinator.shared.build(owner: buildOwner, tree: inputTree, nodes: inputNodes, bounds: bounds, scale: scale) {
+                continuation.yield($0)
+            }
+        }
+        await withTaskCancellationHandler {
+            do {
+                for await progress in updates {
+                    try Task.checkCancellation()
+                    guard activeRequest == requestID else { return }
+                    buildProgress = progress
+                }
+                let prepared = try await request.value
+                try Task.checkCancellation()
+                guard activeRequest == requestID else { return }
+                scene = prepared
+                selectedRect = selectedID.flatMap { prepared.rect(for: $0) }
+                isPreparing = false
+            } catch {
+                if activeRequest == requestID { isPreparing = false }
+            }
+        } onCancel: {
+            request.cancel()
+        }
     }
 }
 
@@ -103,14 +139,10 @@ private struct TreemapBaseLayer: View, Equatable {
             if let raster = scene.raster {
                 context.draw(Image(decorative: raster, scale: 1), in: bounds)
             } else {
-                for category in FileCategory.allCases {
-                    context.fill(
-                        scene.fillPaths[Int(category.rawValue)],
-                        with: .color(FilePalette.color(for: category))
-                    )
+                // The fallback is bounded by the same visible-region budget.
+                for tile in scene.tiles {
+                    context.fill(Path(tile.rect), with: .color(FilePalette.color(for: scene.entries[tile.entryIndex].category)))
                 }
-                context.stroke(scene.lightEdges, with: .color(.white.opacity(0.30)), lineWidth: 1)
-                context.stroke(scene.darkEdges, with: .color(.black.opacity(0.18)), lineWidth: 1)
             }
             for folder in scene.labeledFolders {
                 guard let header = folder.header else { continue }
@@ -124,7 +156,7 @@ private struct TreemapBaseLayer: View, Equatable {
                 let entry = scene.entries[tile.entryIndex]
                 let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
                 let rect = tile.rect.insetBy(dx: gap, dy: gap)
-                let label = Text(scene.tree.name(of: entry.nodeID))
+                let label = Text(entry.isAggregate ? "\(entry.representedFileCount.formatted()) grouped files" : scene.tree.name(of: entry.nodeID))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white)
                 context.draw(label, in: rect.insetBy(dx: 5, dy: 4))

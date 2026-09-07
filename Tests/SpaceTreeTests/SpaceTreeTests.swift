@@ -80,7 +80,7 @@ import SpaceTreeNative
     let tree = try builder.finalize()
     let bounds = CGRect(x: 0, y: 0, width: 800, height: 500)
 
-    let scene = TreemapScene.build(tree: tree, nodes: [nested, rootFile], in: bounds)
+    let scene = try TreemapScene.build(tree: tree, nodes: [nested, rootFile], in: bounds)
 
     #expect(scene.entries.map { tree.name(of: $0.nodeID) } == ["a.bin", "b.bin", "c.bin"])
     #expect(scene.tiles.count == 3)
@@ -105,7 +105,7 @@ import SpaceTreeNative
     let tree = try builder.finalize()
     let bounds = CGRect(x: 0, y: 0, width: 800, height: 500)
 
-    let scene = TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: bounds)
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: bounds)
     let firstLargeRect = try #require(scene.rect(for: firstLarge))
     let firstSmallRect = try #require(scene.rect(for: firstSmall))
     let secondLargeRect = try #require(scene.rect(for: secondLarge))
@@ -385,7 +385,7 @@ import SpaceTreeNative
     let tree = try builder.finalize()
     let treeElapsed = started.duration(to: .now)
     let layoutStarted = ContinuousClock.now
-    let scene = TreemapScene.build(
+    let scene = try TreemapScene.build(
         tree: tree,
         nodes: tree.children(of: tree.rootID),
         in: CGRect(x: 0, y: 0, width: 800, height: 500)
@@ -395,7 +395,8 @@ import SpaceTreeNative
 
     #expect(tree.nodeCount == 1_000_001)
     #expect(tree.estimatedStorageBytes <= 128 * 1_024 * 1_024)
-    #expect(scene.tiles.count == 1_000_000)
+    #expect(scene.representedFileCount == 1_000_000)
+    #expect(scene.tiles.count + scene.folders.count <= TreemapScene.maximumRegions)
     try tree.validate()
 }
 

@@ -98,207 +98,241 @@ enum TreemapLayout {
 }
 
 struct TreemapScene: Sendable {
+    static let maximumRegions = 16_384
     let id = UUID()
+
     struct Entry: Identifiable, Sendable {
         let nodeID: NodeID
         let allocatedBytes: Int64
         let category: FileCategory
-
+        var representedFileCount: Int = 1
+        // Aggregates target their containing folder, never an arbitrary file.
+        var isAggregate = false
         var id: NodeID { nodeID }
     }
-
     struct Tile: Sendable {
         let entryIndex: Int
         let rect: CGRect
     }
-
     struct Hit: Sendable {
         let entry: Entry
         let rect: CGRect
     }
-
     struct Folder: Sendable {
         let nodeID: NodeID
         let rect: CGRect
         let header: CGRect?
     }
-
     let folders: [Folder]
-    let labeledFolders: [Folder]
-    let regionRects: [NodeID: CGRect]
+    var labeledFolders: [Folder] { folders }
     let raster: CGImage?
-    let lightEdges: Path
-    let darkEdges: Path
     let tree: ScanTree
     let entries: [Entry]
     let tiles: [Tile]
-    let fillPaths: [Path]
     let labeledTileIndices: [Int]
     let totalSize: Int64
+    let representedFileCount: Int
+    // Geometry lives in tiles/folders; the lookup stores only an index.
+    private let tileLookup: [NodeID: Int]
+    private let folderLookup: [NodeID: Int]
     private let hitIndex: TreemapHitIndex
 
-    static func build(tree: ScanTree, nodes: [NodeID], in bounds: CGRect, displayScale: CGFloat = 1) -> TreemapScene {
-        var folders: [Folder] = []
-        var regionRects: [NodeID: CGRect] = [:]
-        var entries: [Entry] = []
-        var tiles: [Tile] = []
-        let estimatedFileCount = nodes.reduce(0) { $0 + tree.fileCount(of: $1) }
-        entries.reserveCapacity(estimatedFileCount)
-        tiles.reserveCapacity(estimatedFileCount)
-
-        var pending = Array(arrangedNodes(tree: tree, nodes: nodes, in: bounds).reversed())
-        while let region = pending.popLast() {
-            regionRects[region.nodeID] = region.rect
-            let kind = tree.kind(of: region.nodeID)
-            if kind == .directory || kind == .syntheticRoot {
-                let header = region.rect.width >= 48 && region.rect.height >= 40
-                    ? CGRect(x: region.rect.minX, y: region.rect.minY, width: region.rect.width, height: 20) : nil
-                folders.append(Folder(nodeID: region.nodeID, rect: region.rect, header: header))
-                let content = CGRect(x: region.rect.minX, y: region.rect.minY + (header?.height ?? 0),
-                                     width: region.rect.width, height: region.rect.height - (header?.height ?? 0))
-                pending.append(contentsOf: arrangedNodes(
-                    tree: tree,
-                    nodes: tree.children(of: region.nodeID),
-                    in: content
-                ).reversed())
-                continue
-            }
-
-            let entryIndex = entries.count
-            entries.append(Entry(
-                nodeID: region.nodeID,
-                allocatedBytes: tree.allocatedBytes(of: region.nodeID),
-                category: FilePalette.category(forExtension: tree.fileExtension(of: region.nodeID))
-            ))
-            tiles.append(Tile(entryIndex: entryIndex, rect: region.rect))
+    struct BuildProgress: Sendable {
+        let stage: String
+        var completed: Int = 0
+        var total: Int? = nil
+        var fraction: Double? {
+            total.map { min(1, Double(completed) / Double(max(1, $0))) }
         }
-
-        var fillRects = FileCategory.allCases.map { _ in [CGRect]() }
-        let fillPaths = FileCategory.allCases.map { _ in CGMutablePath() }
-        var labeledTileIndices: [Int] = []
-        let lightEdges = CGMutablePath()
-        let darkEdges = CGMutablePath()
-        for (tileIndex, tile) in tiles.enumerated() {
-            let rect = tile.rect
-            if rect.width >= 3 && rect.height >= 3 {
-                lightEdges.move(to: CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5))
-                lightEdges.addLine(to: CGPoint(x: rect.minX + 0.5, y: rect.minY + 0.5))
-                lightEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
-                darkEdges.move(to: CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5))
-                darkEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.maxY - 0.5))
-                darkEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
-            }
-            fillRects[Int(entries[tile.entryIndex].category.rawValue)].append(rect)
-            fillPaths[Int(entries[tile.entryIndex].category.rawValue)].addRect(rect)
-            if rect.width >= 78, rect.height >= 34 {
-                labeledTileIndices.append(tileIndex)
-            }
-        }
-        return TreemapScene(
-            folders: folders,
-            labeledFolders: folders.filter { $0.header != nil },
-            regionRects: regionRects,
-            raster: rasterize(rects: fillRects, lightEdges: Path(lightEdges), darkEdges: Path(darkEdges), in: bounds, scale: displayScale),
-            lightEdges: Path(lightEdges),
-            darkEdges: Path(darkEdges),
-            tree: tree,
-            entries: entries,
-            tiles: tiles,
-            fillPaths: fillPaths.map { Path($0) },
-            labeledTileIndices: labeledTileIndices,
-            totalSize: entries.reduce(0) { saturatingSceneAdd($0, $1.allocatedBytes) },
-            hitIndex: TreemapHitIndex(tiles: tiles, bounds: bounds)
-        )
     }
 
-    // Fill independent rectangles directly instead of asking the rasterizer to
-    // resolve a compound path with potentially millions of contours. Run once
-    // on the scene-building worker; the UI only composites the resulting image.
-    private static func rasterize(rects: [[CGRect]], lightEdges: Path, darkEdges: Path,
-                                  in bounds: CGRect, scale: CGFloat) -> CGImage? {
-        guard bounds.width > 0, bounds.height > 0, scale.isFinite, scale > 0 else { return nil }
-        let width = ceil(bounds.width * scale)
-        let height = ceil(bounds.height * scale)
-        // Bound the optional cache to 64 megapixels; vector drawing is the fallback.
-        guard width.isFinite, height.isFinite, width * height <= 64_000_000,
-              let context = CGContext(data: nil, width: Int(width), height: Int(height),
-                                      bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+    static func build(
+        tree: ScanTree, nodes: [NodeID], in bounds: CGRect, displayScale: CGFloat = 1,
+        onProgress: (BuildProgress) -> Void = { _ in }
+    ) throws -> TreemapScene {
+        try Task.checkCancellation()
+        let scale = displayScale.isFinite && displayScale > 0 ? displayScale : 1
+        var folders: [Folder] = []
+        var entries: [Entry] = []
+        var tiles: [Tile] = []
+        var tileLookup: [NodeID: Int] = [:]
+        var folderLookup: [NodeID: Int] = [:]
+        let totalFiles = nodes.reduce(0) { $0 + tree.fileCount(of: $1) }
+        var completed = 0
+        onProgress(BuildProgress(stage: "Laying out tree…", total: totalFiles))
+        let owner = nodes.first.flatMap { tree.parent(of: $0) } ?? tree.rootID
+        var pending = Array(try arrangedNodes(tree: tree, nodes: nodes, owner: owner,
+                                              in: bounds, scale: scale, limit: maximumRegions).reversed())
+        // Includes pending, emitted, and expanded regions, so deep trees are bounded too.
+        var remaining = maximumRegions - pending.count
+        while let region = pending.popLast() {
+            try Task.checkCancellation()
+            let kind = tree.kind(of: region.entry.nodeID)
+            let isDirectory = kind == .directory || kind == .syntheticRoot
+            if !region.entry.isAggregate, isDirectory,
+               region.rect.width * scale >= 4, region.rect.height * scale >= 4,
+               remaining > 0, region.depth < 64 {
+                let header = region.rect.width >= 48 && region.rect.height >= 40
+                    ? CGRect(x: region.rect.minX, y: region.rect.minY, width: region.rect.width, height: 20) : nil
+                // Retain ancestors for highlighting, but never a second rectangle dictionary.
+                folderLookup[region.entry.nodeID] = folders.count
+                folders.append(Folder(nodeID: region.entry.nodeID, rect: region.rect, header: header))
+                let content = CGRect(x: region.rect.minX, y: region.rect.minY + (header?.height ?? 0),
+                                     width: region.rect.width, height: region.rect.height - (header?.height ?? 0))
+                let children = try arrangedNodes(tree: tree, nodes: tree.childIDs(of: region.entry.nodeID),
+                                                 owner: region.entry.nodeID, in: content, scale: scale,
+                                                 limit: remaining, depth: region.depth + 1)
+                remaining -= children.count
+                pending.append(contentsOf: children.reversed())
+                continue
+            }
+            var entry = region.entry
+            if isDirectory { entry.isAggregate = true }
+            if !entry.isAggregate { entry = Entry(nodeID: entry.nodeID, allocatedBytes: entry.allocatedBytes,
+                                                  category: FilePalette.category(forExtension: tree.fileExtension(of: entry.nodeID))) }
+            tileLookup[entry.nodeID] = tiles.count
+            entries.append(entry)
+            tiles.append(Tile(entryIndex: entries.count - 1, rect: region.rect))
+            completed += entry.representedFileCount
+            if tiles.count.isMultiple(of: 256) {
+                onProgress(BuildProgress(stage: "Laying out tree…", completed: completed, total: totalFiles))
+            }
+        }
+        onProgress(BuildProgress(stage: "Laying out tree…", completed: completed, total: totalFiles))
+        onProgress(BuildProgress(stage: "Rendering tree…"))
+        let raster = try rasterize(entries: entries, tiles: tiles, in: bounds, scale: scale)
+        onProgress(BuildProgress(stage: "Finishing tree…"))
+        let hitIndex = try TreemapHitIndex(tiles: tiles, bounds: bounds)
+        return TreemapScene(folders: folders, raster: raster, tree: tree, entries: entries, tiles: tiles,
+                            labeledTileIndices: tiles.indices.filter { tiles[$0].rect.width >= 78 && tiles[$0].rect.height >= 34 },
+                            totalSize: entries.reduce(0) { saturatingSceneAdd($0, $1.allocatedBytes) },
+                            representedFileCount: completed, tileLookup: tileLookup, folderLookup: folderLookup, hitIndex: hitIndex)
+    }
+
+    // Draw each bounded tile directly. No category rectangle arrays or retained CGPaths.
+    private static func rasterize(entries: [Entry], tiles: [Tile], in bounds: CGRect, scale: CGFloat) throws -> CGImage? {
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
+        let width = ceil(bounds.width * scale), height = ceil(bounds.height * scale)
+        guard width.isFinite, height.isFinite, width * height <= 16_000_000,
+              let context = CGContext(data: nil, width: Int(width), height: Int(height), bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         context.translateBy(x: 0, y: height)
         context.scaleBy(x: scale, y: -scale)
         context.translateBy(x: -bounds.minX, y: -bounds.minY)
         context.setShouldAntialias(false)
-        for category in FileCategory.allCases {
-            guard let color = FilePalette.color(for: category).cgColor else { return nil }
-            context.setFillColor(color)
-            // The array overload benchmarks poorly on dense squarified
-            // layouts. Filling rectangles individually keeps this fast.
-            for rect in rects[Int(category.rawValue)] { context.fill(rect) }
+        let colors = FileCategory.allCases.map { FilePalette.color(for: $0).cgColor! }
+        for (index, tile) in tiles.enumerated() {
+            if index.isMultiple(of: 256) { try Task.checkCancellation() }
+            context.setFillColor(colors[Int(entries[tile.entryIndex].category.rawValue)])
+            context.fill(tile.rect)
         }
         context.setShouldAntialias(true)
         context.setLineWidth(1)
-        context.setStrokeColor(CGColor(gray: 1, alpha: 0.30))
-        context.addPath(lightEdges.cgPath)
-        context.strokePath()
-        context.setStrokeColor(CGColor(gray: 0, alpha: 0.18))
-        context.addPath(darkEdges.cgPath)
-        context.strokePath()
+        for (index, tile) in tiles.enumerated() where tile.rect.width >= 3 && tile.rect.height >= 3 {
+            if index.isMultiple(of: 256) { try Task.checkCancellation() }
+            let rect = tile.rect
+            context.setStrokeColor(CGColor(gray: 1, alpha: 0.30))
+            context.move(to: CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5))
+            context.addLine(to: CGPoint(x: rect.minX + 0.5, y: rect.minY + 0.5))
+            context.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
+            context.strokePath()
+            context.setStrokeColor(CGColor(gray: 0, alpha: 0.18))
+            context.move(to: CGPoint(x: rect.minX + 0.5, y: rect.maxY - 0.5))
+            context.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.maxY - 0.5))
+            context.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
+            context.strokePath()
+        }
+        try Task.checkCancellation()
         return context.makeImage()
     }
 
     private struct NodeRegion {
-        let nodeID: NodeID
+        var entry: Entry
         let rect: CGRect
+        var depth: Int = 0
+    }
+    private struct WeightedEntry {
+        let entry: Entry
+        let weight: Double
     }
 
-    private static func arrangedNodes(
-        tree: ScanTree,
-        nodes: [NodeID],
-        in bounds: CGRect
-    ) -> [NodeRegion] {
-        var items: [TreemapLayout.Item] = []
-        items.reserveCapacity(nodes.count)
-        for nodeID in nodes {
-            let kind = tree.kind(of: nodeID)
-            let isDirectory = kind == .directory || kind == .syntheticRoot
-            let fileCount = tree.fileCount(of: nodeID)
-            if isDirectory, fileCount == 0 { continue }
-            let allocatedBytes = tree.allocatedBytes(of: nodeID)
-            let weight = isDirectory
-                ? max(Double(allocatedBytes), Double(fileCount))
-                : max(1, Double(allocatedBytes))
-            items.append(TreemapLayout.Item(id: nodeID, weight: weight))
+    private static func arrangedNodes<IDs: Sequence>(
+        tree: ScanTree, nodes: IDs, owner: NodeID, in bounds: CGRect,
+        scale: CGFloat, limit: Int, depth: Int = 0
+    ) throws -> [NodeRegion] where IDs.Element == NodeID {
+        guard bounds.width > 0, bounds.height > 0, limit > 0 else { return [] }
+        // Two linear passes over sibling IDs, with no full sibling array or unbounded sort.
+        func weight(_ id: NodeID) -> Double {
+            max(Double(tree.allocatedBytes(of: id)), Double(tree.fileCount(of: id)))
         }
-        items.sort {
-            if $0.weight == $1.weight { return $0.id < $1.id }
-            return $0.weight > $1.weight
+        var total = 0.0
+        for (index, id) in nodes.enumerated() {
+            if index.isMultiple(of: 1_024) { try Task.checkCancellation() }
+            if tree.fileCount(of: id) > 0 { total += weight(id) }
         }
-        let rectangles = TreemapLayout.rectangles(for: items, in: bounds)
-        return zip(items, rectangles).map { NodeRegion(nodeID: $0.id, rect: $1) }
+        guard total > 0 else { return [] }
+        let pixels = bounds.width * bounds.height * scale * scale
+        // Reserve one slot for the aggregate. Qualifying candidates are mathematically
+        // bounded by limit - 1; four physical pixels is the minimum useful tile area.
+        let cutoff = max(total / Double(max(1, limit - 1)), total * 4 / max(1, pixels))
+        var items: [WeightedEntry] = []
+        var smallWeight = 0.0
+        var smallBytes: Int64 = 0
+        var smallFiles = 0
+        var smallNode: NodeID?
+        var smallItemCount = 0
+        for (index, id) in nodes.enumerated() {
+            if index.isMultiple(of: 1_024) { try Task.checkCancellation() }
+            let count = tree.fileCount(of: id)
+            guard count > 0 else { continue }
+            let bytes = tree.allocatedBytes(of: id), value = weight(id)
+            if limit > 1, value >= cutoff, items.count < limit - 1 {
+                items.append(WeightedEntry(entry: Entry(nodeID: id, allocatedBytes: bytes, category: .other,
+                                                         representedFileCount: count), weight: value))
+            } else {
+                smallNode = id
+                smallItemCount += 1
+                smallWeight += value
+                smallBytes = saturatingSceneAdd(smallBytes, bytes)
+                smallFiles += count
+            }
+        }
+        if smallFiles > 0 {
+            let destination: NodeID
+            if smallItemCount == 1, let smallNode,
+               tree.kind(of: smallNode) == .directory || tree.kind(of: smallNode) == .syntheticRoot {
+                destination = smallNode
+            } else { destination = owner }
+            items.append(WeightedEntry(entry: Entry(nodeID: destination, allocatedBytes: smallBytes, category: .other,
+                                                     representedFileCount: smallFiles, isAggregate: true), weight: smallWeight))
+        }
+        try Task.checkCancellation()
+        items.sort { $0.weight == $1.weight ? $0.entry.nodeID < $1.entry.nodeID : $0.weight > $1.weight }
+        let rectangles = TreemapLayout.rectangles(for: items, in: bounds, weight: \.weight)
+        try Task.checkCancellation()
+        return zip(items, rectangles).map { NodeRegion(entry: $0.entry, rect: $1, depth: depth) }
     }
 
     func hit(at point: CGPoint) -> Hit? {
-        if let folder = labeledFolders.first(where: { $0.header?.contains(point) == true }) {
-            return Hit(entry: Entry(nodeID: folder.nodeID, allocatedBytes: tree.allocatedBytes(of: folder.nodeID), category: FilePalette.category(forExtension: "Folder")), rect: folder.rect)
+        if let folder = folders.first(where: { $0.header?.contains(point) == true }) {
+            return Hit(entry: Entry(nodeID: folder.nodeID, allocatedBytes: tree.allocatedBytes(of: folder.nodeID), category: .other), rect: folder.rect)
         }
-        guard let tileIndex = hitIndex.tileIndex(at: point, tiles: tiles) else { return nil }
-        let tile = tiles[tileIndex]
-        return Hit(entry: entries[tile.entryIndex], rect: tile.rect)
+        guard let index = hitIndex.tileIndex(at: point, tiles: tiles) else { return nil }
+        return Hit(entry: entries[tiles[index].entryIndex], rect: tiles[index].rect)
     }
-
     func rect(for nodeID: NodeID) -> CGRect? {
-        regionRects[nodeID]
+        if let index = folderLookup[nodeID] { return folders[index].rect }
+        return tileLookup[nodeID].map { tiles[$0].rect }
     }
 }
-
 private struct TreemapHitIndex: Sendable {
     private let bounds: CGRect
     private let columns: Int
     private let rows: Int
     private let buckets: [[Int]]
 
-    init(tiles: [TreemapScene.Tile], bounds: CGRect) {
+    init(tiles: [TreemapScene.Tile], bounds: CGRect) throws {
         self.bounds = bounds
         let aspect = max(0.2, min(5, bounds.width / max(1, bounds.height)))
         let targetBucketCount = max(64, min(4_096, tiles.count / 8))
@@ -307,6 +341,7 @@ private struct TreemapHitIndex: Sendable {
 
         var buckets = Array(repeating: [Int](), count: columns * rows)
         for (tileIndex, tile) in tiles.enumerated() {
+            if tileIndex.isMultiple(of: 256) { try Task.checkCancellation() }
             let range = Self.bucketRange(for: tile.rect, bounds: bounds, columns: columns, rows: rows)
             for row in range.minRow...range.maxRow {
                 for column in range.minColumn...range.maxColumn {

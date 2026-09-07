@@ -11,14 +11,13 @@ import Testing
                             modifiedAt: nil, identity: nil)
     }
     let tree = try builder.finalize()
-    let scene = TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
                                    in: CGRect(x: 30, y: 20, width: 1_200, height: 800))
     #expect(scene.raster?.width == 1_200)
     #expect(scene.raster?.height == 800)
     for tile in scene.tiles {
         let point = CGPoint(x: tile.rect.midX, y: tile.rect.midY)
         let entry = scene.entries[tile.entryIndex]
-        #expect(scene.fillPaths[Int(entry.category.rawValue)].contains(point))
         #expect(scene.hit(at: point)?.entry.nodeID == entry.nodeID)
     }
     #expect(scene.hit(at: .zero) == nil)
@@ -33,7 +32,7 @@ import Testing
     }
     let tree = try builder.finalize()
     let bounds = CGRect(x: 30, y: 20, width: 120, height: 160)
-    let scene = TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: bounds, displayScale: 2)
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: bounds, displayScale: 2)
     let image = try #require(scene.raster)
     #expect(image.width == 240)
     #expect(image.height == 320)
@@ -49,4 +48,31 @@ import Testing
         }
         #expect(bytes[offset + 3] == 255)
     }
+}
+
+@Test func treemapProgressCountsNestedFilesAndReportsRendering() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    let folder = builder.addNode(parent: builder.rootID, name: "nested", kind: .directory,
+                                 allocatedBytes: 0, logicalBytes: 0, modifiedAt: nil, identity: nil)
+    for index in 0..<2_050 {
+        _ = builder.addNode(parent: folder, name: "file-\(index)", kind: .file,
+                            allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
+    }
+    let tree = try builder.finalize()
+    var updates: [TreemapScene.BuildProgress] = []
+    let scene = try TreemapScene.build(tree: tree, nodes: [folder],
+                                   in: CGRect(x: 0, y: 0, width: 800, height: 600)) {
+        updates.append($0)
+    }
+    for stage in ["Laying out tree…"] {
+        let progress = updates.filter { $0.stage == stage }
+        #expect(progress.first?.completed == 0)
+        #expect(progress.last?.completed == scene.tiles.count)
+        #expect(progress.last?.fraction == 1)
+        #expect(progress.contains { $0.completed > 0 && $0.completed < 2_050 })
+        #expect(progress.allSatisfy { $0.total == 2_050 })
+        #expect(zip(progress, progress.dropFirst()).allSatisfy { $0.completed <= $1.completed })
+    }
+    #expect(updates.suffix(2).map(\.stage) == ["Rendering tree…", "Finishing tree…"])
+    #expect(updates.suffix(2).allSatisfy { $0.fraction == nil })
 }
