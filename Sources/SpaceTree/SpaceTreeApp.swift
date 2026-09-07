@@ -44,7 +44,7 @@ struct SpaceTreeApp: App {
             }
             CommandGroup(replacing: .newItem) {
                 Button("Choose Folder…") { model.chooseFolder() }
-                    .keyboardShortcut("o")
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Scan Home Folder") { model.scanHome() }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
                 Button("Scan All Mounted Items") { model.scanAll() }

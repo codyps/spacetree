@@ -55,7 +55,7 @@ Then quit and reopen SpaceTree before scanning again.
 
 ## Controls
 
-- **Add Folder** or `⌘O`: add a particular folder and immediately scan it
+- **Add Folder** or `⇧⌘O`: add a particular folder and immediately scan it
 - **Add Home** or `⇧⌘H`: add and scan your home folder
 - **Scan All** or `⇧⌘A`: scan all currently mounted items and added folders concurrently
 - **Refresh Volumes**: discover newly mounted filesystems without discarding results
@@ -63,7 +63,13 @@ Then quit and reopen SpaceTree before scanning again.
 - **Rescan**: explicitly discard and replace that item's previous result
 - Hover a file tile: inspect its full path, allocated size, and share of the current view
 - Single-click a file tile or row: select it
-- Double-click a folder row: drill into it
+- Shift-click selects a range of tree rows; Command-click toggles individual rows; `⌘A` selects all visible rows
+- Arrow keys navigate the tree; Left/Right collapse and expand folders; type a name to jump to it
+- Double-click a row or map tile, `⌘O`, or `⌘↓`: open a folder in SpaceTree or a file in its default app
+- Space: Quick Look; Return: rename the selected item
+- `⌘C`: copy selected files; `⌥⌘C`: copy their pathnames
+- Right-click or Control-click either view for Open, Reveal in Finder, Quick Look, Copy, Copy Pathname, Rename, and Move to Trash
+- `⌘⌫`: move selected items to Trash after confirmation. Rename and Trash update the scan; scan roots are protected
 - Click a breadcrumb: navigate back up
 - **Back** (`⌘[`) and **Forward** (`⌘]`): revisit directories within the current report
 - **Up** (`⌘↑`): open the enclosing directory, stopping at the scan root

@@ -10,7 +10,7 @@ struct ContentView: View {
                 Divider()
                 ExplorerView(target: target)
             } else {
-                ToolbarView()
+                DashboardToolbar()
                 Divider()
                 DashboardView()
             }
@@ -19,21 +19,24 @@ struct ContentView: View {
     }
 }
 
-private struct ToolbarView: View {
+private struct DashboardToolbar: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(spacing: 12) {
-            HStack(spacing: 8) {
+        HStack(spacing: 10) {
+            HStack(spacing: 6) {
                 Image(systemName: "square.grid.3x3.fill")
                     .foregroundStyle(.blue)
-                    .font(.title2)
+                    .font(.system(size: 15))
                 Text("SpaceTree")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 14, weight: .semibold))
+                Text("\(model.visibleTargets.count) items")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .padding(.leading, 12)
+            .fixedSize()
 
-            Divider().frame(height: 22)
+            Divider().frame(height: 18)
 
             Button(action: model.chooseFolder) {
                 Label("Add Folder", systemImage: "folder.badge.plus")
@@ -48,7 +51,9 @@ private struct ToolbarView: View {
                 Label("Refresh Volumes", systemImage: "arrow.clockwise")
             }
 
-            Spacer()
+            volumeFilters
+
+            Spacer(minLength: 8)
 
             if model.scanningCount > 0 {
                 Text("\(model.scanningCount) scanning")
@@ -63,9 +68,39 @@ private struct ToolbarView: View {
             .disabled(model.visibleTargets.isEmpty)
         }
         .controlSize(.small)
-        .frame(height: 50)
-        .padding(.horizontal, 8)
+        .frame(height: 42)
+        .padding(.horizontal, 12)
         .background(.regularMaterial)
+    }
+
+    @ViewBuilder
+    private var volumeFilters: some View {
+        if model.timeMachineTargetCount > 0 || model.diskImageTargetCount > 0 || model.auxiliaryTargetCount > 0 {
+            Menu {
+                if model.timeMachineTargetCount > 0 {
+                    Toggle("Time Machine (\(model.timeMachineTargetCount))", isOn: Binding(
+                        get: { model.showTimeMachineMounts },
+                        set: { model.showTimeMachineMounts = $0 }
+                    ))
+                }
+                if model.diskImageTargetCount > 0 {
+                    Toggle("Disk images (\(model.diskImageTargetCount))", isOn: Binding(
+                        get: { model.showDiskImageMounts },
+                        set: { model.showDiskImageMounts = $0 }
+                    ))
+                }
+                if model.auxiliaryTargetCount > 0 {
+                    Toggle("Developer/system (\(model.auxiliaryTargetCount))", isOn: Binding(
+                        get: { model.showAuxiliaryMounts },
+                        set: { model.showAuxiliaryMounts = $0 }
+                    ))
+                }
+            } label: {
+                Label("Show", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            .fixedSize()
+            .help("Choose which mounted filesystems to show")
+        }
     }
 }
 
@@ -74,48 +109,6 @@ private struct DashboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Storage and mounted filesystems")
-                        .font(.system(size: 25, weight: .bold))
-                    Text("Scan any combination at once. Results remain available until you rescan that item.")
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                HStack(alignment: .center, spacing: 14) {
-                    Text("\(model.visibleTargets.count) items")
-                        .foregroundStyle(.secondary)
-                    if model.timeMachineTargetCount > 0 {
-                        Toggle("Time Machine (\(model.timeMachineTargetCount))", isOn: Binding(
-                            get: { model.showTimeMachineMounts },
-                            set: { model.showTimeMachineMounts = $0 }
-                        ))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                    }
-                    if model.diskImageTargetCount > 0 {
-                        Toggle("Disk images (\(model.diskImageTargetCount))", isOn: Binding(
-                            get: { model.showDiskImageMounts },
-                            set: { model.showDiskImageMounts = $0 }
-                        ))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                    }
-                    if model.auxiliaryTargetCount > 0 {
-                        Toggle("Developer/system (\(model.auxiliaryTargetCount))", isOn: Binding(
-                            get: { model.showAuxiliaryMounts },
-                            set: { model.showAuxiliaryMounts = $0 }
-                        ))
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                    }
-                }
-            }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 18)
-
-            Divider()
-
             if model.visibleTargets.isEmpty {
                 ContentUnavailableView {
                     Label("No mounted filesystems found", systemImage: "externaldrive.badge.questionmark")
@@ -322,6 +315,7 @@ private struct ExplorerView: View {
                                 tree: tree,
                                 nodeIDs: target.visibleChildren.map(\.handle.nodeID),
                                 selectedID: target.selectedID,
+                                target: target,
                                 onSelect: { node in
                                     target.select(node)
                                     revealRequest += 1
@@ -333,7 +327,7 @@ private struct ExplorerView: View {
                 .padding(10)
                 .frame(minHeight: 260)
 
-                FileListView(target: target, revealRequest: revealRequest)
+                FileOutlineView(target: target, revealRequest: revealRequest)
                     .frame(minHeight: 180, idealHeight: 250)
             }
         }
@@ -475,129 +469,5 @@ private struct LegendView: View {
             Text("Every file is a tile · hover for details").foregroundStyle(.tertiary)
         }
         .font(.caption2)
-    }
-}
-
-private struct FileListView: View {
-    @Bindable var target: ScanTarget
-    let revealRequest: Int
-    @State private var expanded: Set<NodeID> = []
-
-    private var rows: [FileTreeRow] {
-        guard let tree = target.tree else { return [] }
-        return FileTreeRow.visible(tree: tree, roots: target.visibleChildren.map(\.handle.nodeID), expanded: expanded)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Name").frame(maxWidth: .infinity, alignment: .leading)
-                Text("% of parent").frame(width: 130, alignment: .leading)
-                Text("Type").frame(width: 90, alignment: .leading)
-                Text("Items").frame(width: 70, alignment: .trailing)
-                Text("Allocated").frame(width: 100, alignment: .trailing)
-                Text("Modified").frame(width: 130, alignment: .trailing)
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 12)
-            .frame(height: 28)
-            .background(Color(nsColor: .controlBackgroundColor))
-
-            Divider()
-
-            ScrollViewReader { proxy in
-                List(selection: Binding<NodeID?>(
-                    get: { target.selectedID },
-                    set: { target.selectedID = $0 }
-                )) {
-                    ForEach(rows) { row in
-                        if let tree = target.tree {
-                            let node = tree.metadata(for: row.id)
-                            FileRow(node: node, depth: row.depth, fraction: tree.fractionOfParent(row.id),
-                                    expanded: expanded.contains(row.id)) {
-                                if !expanded.insert(row.id).inserted { expanded.remove(row.id) }
-                            }
-                            .tag(row.id)
-                            .id(row.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture(count: 2) { target.open(node) }
-                        }
-                    }
-                }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
-                .onChange(of: target.selectedID, initial: true) { _, id in
-                    revealSelection(using: proxy)
-                }
-                .onChange(of: revealRequest) { _, _ in revealSelection(using: proxy) }
-                .onChange(of: target.tree?.generation) { _, _ in expanded.removeAll() }
-            }
-        }
-    }
-
-    private func revealSelection(using proxy: ScrollViewProxy) {
-        guard let id = target.selectedID, let tree = target.tree else { return }
-        expanded.formUnion(tree.breadcrumbs(to: id).dropLast())
-        Task { @MainActor in
-            await Task.yield()
-            proxy.scrollTo(id, anchor: .center)
-        }
-    }
-
-}
-
-private struct FileRow: View {
-    let node: NodeMetadata
-    let depth: Int
-    let fraction: Double
-    let expanded: Bool
-    let toggle: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 7) {
-                Color.clear.frame(width: CGFloat(depth) * 16, height: 1)
-                Button(action: toggle) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption2.weight(.bold))
-                        .frame(width: 12)
-                }
-                .buttonStyle(.plain)
-                .opacity(node.isDirectory ? 1 : 0)
-                .disabled(!node.isDirectory)
-                .accessibilityLabel(expanded ? "Collapse folder" : "Expand folder")
-                Image(systemName: node.isDirectory ? "folder.fill" : (node.isDuplicateReference ? "link" : "doc.fill"))
-                    .foregroundStyle(FilePalette.color(for: node))
-                Text(node.name).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            HStack(spacing: 5) {
-                GeometryReader { geometry in
-                    Capsule().fill(Color.secondary.opacity(0.15))
-                    Capsule().fill(FilePalette.color(for: node))
-                        .frame(width: geometry.size.width * fraction)
-                }
-                .frame(height: 8)
-                Text(fraction.formatted(.percent.precision(.fractionLength(1))))
-                    .monospacedDigit()
-                    .font(.caption)
-                    .frame(width: 48, alignment: .trailing)
-            }
-            .frame(width: 130)
-            .accessibilityLabel("\(fraction.formatted(.percent)) of parent folder")
-            Text(node.isDuplicateReference ? "Hard link" : node.fileExtension.capitalized)
-                .foregroundStyle(.secondary)
-                .frame(width: 90, alignment: .leading)
-            Text(node.isDirectory ? node.fileCount.formatted() : "—")
-                .monospacedDigit()
-                .frame(width: 70, alignment: .trailing)
-            Text(node.allocatedBytes.formattedByteCount)
-                .monospacedDigit()
-                .frame(width: 100, alignment: .trailing)
-            Text(node.modifiedAt?.formatted(date: .abbreviated, time: .omitted) ?? "—")
-                .foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .trailing)
-        }
-        .font(.callout)
     }
 }

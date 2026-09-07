@@ -4,6 +4,7 @@ struct TreemapView: View {
     let tree: ScanTree
     let nodeIDs: [NodeID]
     let selectedID: NodeID?
+    let target: ScanTarget
     let onSelect: (NodeMetadata) -> Void
 
     @Environment(\.displayScale) private var displayScale
@@ -23,20 +24,11 @@ struct TreemapView: View {
                         TreemapBaseLayer(scene: scene, bounds: bounds)
                             .equatable()
                         TreemapHoverOverlay(hover: hover, selectedRect: selectedRect)
-                        .contentShape(Rectangle())
-                        .onContinuousHover { phase in
-                            switch phase {
-                            case .active(let location): hover.update(at: location, in: scene)
-                            case .ended: hover.clear()
-                            }
+                            .allowsHitTesting(false)
+                        TreemapInteractionView(scene: scene, target: target, onSelect: onSelect) { location in
+                            if let location { hover.update(at: location, in: scene) }
+                            else { hover.clear() }
                         }
-                        .gesture(
-                            SpatialTapGesture().onEnded { value in
-                                if let hit = scene.hit(at: value.location) {
-                                    onSelect(scene.tree.metadata(for: hit.entry.nodeID))
-                                }
-                            }
-                        )
                         .onChange(of: selectedID) { _, newValue in
                             selectedRect = newValue.flatMap { scene.rect(for: $0) }
                         }
