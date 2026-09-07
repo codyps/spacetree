@@ -34,7 +34,9 @@ struct TreemapView: View {
                         }
                         .allowsHitTesting(!isPreparing)
                         .onChange(of: selectedID) { _, newValue in
-                            selectedRect = newValue.flatMap { scene.rect(for: $0) }
+                            selectedRect = newValue.flatMap { id in
+                                scene.rect(for: id) ?? (hover.details?.nodeID == id ? hover.details?.rect : nil)
+                            }
                         }
                     }
                     if isPreparing {
@@ -64,7 +66,7 @@ struct TreemapView: View {
             TreemapHoverPath(hover: hover)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Disk usage treemap. Small files are grouped; open folders for detail.")
+        .accessibilityLabel("Disk usage treemap. Grouped blocks show directory names; hover identifies individual files.")
     }
 
     @MainActor
@@ -156,8 +158,8 @@ private struct TreemapBaseLayer: View, Equatable {
                 let entry = scene.entries[tile.entryIndex]
                 let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
                 let rect = tile.rect.insetBy(dx: gap, dy: gap)
-                let label = Text(entry.isAggregate ? "\(entry.representedFileCount.formatted()) grouped files" : scene.tree.name(of: entry.nodeID))
-                    .font(.system(size: 11, weight: .semibold))
+                let label = Text(scene.label(for: entry))
+                    .font(.system(size: entry.isAggregate ? 10 : 11, weight: .semibold))
                     .foregroundStyle(.white)
                 context.draw(label, in: rect.insetBy(dx: 5, dy: 4))
             }

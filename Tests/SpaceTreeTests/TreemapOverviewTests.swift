@@ -103,3 +103,63 @@ import Testing
     } catch is CancellationError { }
     continuation.finish()
 }
+
+@Test func groupedBlocksStaySmallShowDirectoryAndResolveIndividualHover() throws {
+    var builder = ScanTreeBuilder(rootName: "Tiny Files", rootURL: URL(fileURLWithPath: "/tmp/tiny"))
+    for index in 0..<40_000 {
+        _ = builder.addNode(parent: builder.rootID, name: "file-\(index)", kind: .file,
+                            allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
+    }
+    let tree = try builder.finalize()
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
+                                      in: CGRect(x: 0, y: 0, width: 400, height: 200))
+    #expect(scene.tiles.count > 10)
+    #expect(scene.tiles.count < 40_000)
+    #expect(scene.totalSize == 40_000)
+    #expect(scene.representedFileCount == 40_000)
+    for tile in scene.tiles {
+        #expect(tile.rect.width * tile.rect.height <= 4_096.01)
+        #expect(scene.label(for: scene.entries[tile.entryIndex]).hasPrefix("Tiny Files · "))
+    }
+    #expect(!scene.labeledTileIndices.isEmpty)
+    let tile = try #require(scene.tiles.first)
+    var found = Set<NodeID>()
+    for x in 0..<8 {
+        for y in 0..<8 {
+            let point = CGPoint(x: tile.rect.minX + (Double(x) + 0.5) * tile.rect.width / 8,
+                                y: tile.rect.minY + (Double(y) + 0.5) * tile.rect.height / 8)
+            let hit = try #require(scene.hit(at: point))
+            #expect(!hit.entry.isAggregate)
+            #expect(tree.kind(of: hit.entry.nodeID) == .file)
+            #expect(hit.entry.allocatedBytes == 1)
+            #expect(hit.rect.contains(point))
+            #expect(abs(hit.rect.width * hit.rect.height - 2) < 0.001)
+            found.insert(hit.entry.nodeID)
+        }
+    }
+    #expect(found.count == 64)
+}
+
+@Test func largeLaterFoldersKeepTheirInternalStructure() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    let first = builder.addNode(parent: builder.rootID, name: "first", kind: .directory,
+                                allocatedBytes: 0, logicalBytes: 0, modifiedAt: nil, identity: nil)
+    let later = builder.addNode(parent: builder.rootID, name: "later", kind: .directory,
+                                allocatedBytes: 0, logicalBytes: 0, modifiedAt: nil, identity: nil)
+    let inner = builder.addNode(parent: later, name: "inner", kind: .directory,
+                                allocatedBytes: 0, logicalBytes: 0, modifiedAt: nil, identity: nil)
+    for index in 0..<20_000 {
+        _ = builder.addNode(parent: first, name: "file-\(index)", kind: .file,
+                            allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
+    }
+    let file = builder.addNode(parent: inner, name: "visible.txt", kind: .file,
+                               allocatedBytes: 20_000, logicalBytes: 20_000, modifiedAt: nil, identity: nil)
+    let tree = try builder.finalize()
+    let scene = try TreemapScene.build(tree: tree, nodes: [first, later],
+                                      in: CGRect(x: 0, y: 0, width: 1200, height: 800), displayScale: 2)
+    #expect(scene.folders.contains { $0.nodeID == later })
+    #expect(scene.folders.contains { $0.nodeID == inner })
+    #expect(scene.entries.contains { $0.nodeID == file && !$0.isAggregate })
+    #expect(scene.tiles.count + scene.folders.count <= TreemapScene.maximumRegions)
+    #expect(scene.totalSize == 40_000)
+}

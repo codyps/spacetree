@@ -83,7 +83,7 @@ Container scans coalesce overlapping roots and track directory device/inode iden
 
 ### Treemap performance
 
-The overview generates at most 16,384 regions, grouping detail below four physical pixels of area. Groups preserve file counts and allocated byte totals. Hover shows the grouped count; double-click opens the folder when available. The file tree always retains individual files. Group menus offer folder navigation, rather than file mutation actions.
+The overview generates at most 131,072 regions, sharing detail proportionally across folders so one large subtree cannot hide the rest. Internal folders stay visible unless their own projected size is tiny. Small-file groups are split into compact blocks and labeled with their directory name where there is room. A compact weighted file index resolves individual-file hover, selection, and context-menu actions inside those blocks without storing individual drawing rectangles. The file tree retains all files.
 
 Layout jobs are cancelled and joined before their replacements start, and window resizing is coalesced for 120 ms while the previous image remains visible. Tiles draw directly into a bitmap capped at 16 megapixels; the fallback also uses the bounded tile set.
 

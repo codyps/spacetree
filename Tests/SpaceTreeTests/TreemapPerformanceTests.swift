@@ -18,7 +18,10 @@ import Testing
     for tile in scene.tiles {
         let point = CGPoint(x: tile.rect.midX, y: tile.rect.midY)
         let entry = scene.entries[tile.entryIndex]
-        #expect(scene.hit(at: point)?.entry.nodeID == entry.nodeID)
+        let hit = try #require(scene.hit(at: point))
+        if !entry.isAggregate { #expect(hit.entry.nodeID == entry.nodeID) }
+        #expect(hit.rect.contains(point))
+        #expect(!hit.entry.isAggregate)
     }
     #expect(scene.hit(at: .zero) == nil)
 }

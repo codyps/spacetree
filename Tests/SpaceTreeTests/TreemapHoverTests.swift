@@ -76,7 +76,10 @@ import Testing
             hover.update(at: point, in: scene)
             let duration = start.duration(to: .now).components
             samples.append(Double(duration.seconds) * 1_000 + Double(duration.attoseconds) / 1e15)
-            #expect(hover.details?.nodeID == scene.entries[tile.entryIndex].nodeID)
+            let hit = try #require(scene.hit(at: point))
+            #expect(hover.details?.nodeID == hit.entry.nodeID)
+            #expect(tree.parent(of: hit.entry.nodeID) == parent)
+            #expect(hit.rect.contains(point))
         }
         samples.sort()
         print("Hover event processing (\(name), 24 ancestors, 2000 moves): p50=\(samples[1000])ms p99=\(samples[1980])ms max=\(samples.last!)ms")

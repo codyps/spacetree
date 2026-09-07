@@ -466,7 +466,7 @@ private struct LegendView: View {
                 }
             }
             Spacer()
-            Text("Small files are grouped · open folders for detail").foregroundStyle(.tertiary)
+            Text("Hover for individual files · open folders for detail").foregroundStyle(.tertiary)
         }
         .font(.caption2)
     }

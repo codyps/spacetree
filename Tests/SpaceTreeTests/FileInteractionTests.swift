@@ -123,7 +123,7 @@ struct FileInteractionTests {
         #expect(blankMenu.items.first?.isEnabled == false)
     }
 
-    @Test func aggregateMenuOffersOnlyFolderNavigation() throws {
+    @Test func aggregateMenuTargetsTheIndividualFile() throws {
         let (target, folder, _, _) = try fixture()
         let tree = try #require(target.tree)
         // A tiny viewport forces grouping without manufacturing scene entries.
@@ -134,8 +134,9 @@ struct FileInteractionTests {
         view.target = target
         view.onSelect = { target.select($0) }
         let menu = try #require(view.menu(for: click(view, at: NSPoint(x: 0.5, y: 0.5))))
-        #expect(target.selectedID == folder)
-        #expect(menu.items.map(\.title) == ["Open Containing Folder"])
+        #expect(target.selectedID != folder)
+        #expect(target.selectedID == scene.hit(at: CGPoint(x: 0.5, y: 0.5))?.entry.nodeID)
+        #expect(menu.items.first?.title == "Open")
     }
 
     @Test func arrowKeysExpandAndCollapseTheNativeHierarchy() throws {

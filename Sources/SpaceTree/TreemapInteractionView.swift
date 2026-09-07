@@ -23,7 +23,6 @@ final class MapInputView: NSView {
     var target: ScanTarget?
     var onSelect: ((NodeMetadata) -> Void)?
     var onHover: ((CGPoint?) -> Void)?
-    private var aggregateSelectedID: NodeID?
     private var tracking: NSTrackingArea?
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
@@ -55,8 +54,7 @@ final class MapInputView: NSView {
         if event.modifierFlags.contains(.control) { rightMouseDown(with: event); return }
         window?.makeFirstResponder(self)
         guard let node = node(at: event), let target else { return }
-        let hit = scene?.hit(at: convert(event.locationInWindow, from: nil))
-        aggregateSelectedID = hit?.entry.isAggregate == true ? node.handle.nodeID : nil
+        onHover?(convert(event.locationInWindow, from: nil))
         onSelect?(node)
         if event.clickCount == 2 { FileItemActions.shared.open([node], target: target) }
     }
@@ -64,27 +62,12 @@ final class MapInputView: NSView {
         guard let target else { return nil }
         window?.makeFirstResponder(self)
         let node = node(at: event)
-        let hit = scene?.hit(at: convert(event.locationInWindow, from: nil))
-        aggregateSelectedID = hit?.entry.isAggregate == true ? node?.handle.nodeID : nil
+        onHover?(convert(event.locationInWindow, from: nil))
         if let node { onSelect?(node) }
-        if hit?.entry.isAggregate == true {
-            let menu = NSMenu()
-            let item = NSMenuItem(title: "Open Containing Folder", action: #selector(openAggregateFolder), keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-            return menu
-        }
         return FileItemActions.shared.menu(for: node.map { [$0] } ?? [], target: target)
     }
     override func keyDown(with event: NSEvent) {
         guard let target else { super.keyDown(with: event); return }
-        if let aggregateSelectedID, target.selectedID == aggregateSelectedID {
-            // A group is not a file selection: never rename/trash/copy its parent.
-            if event.modifierFlags.contains(.command), event.keyCode == 125 || event.charactersIgnoringModifiers == "o" {
-                openAggregateFolder()
-            }
-            return
-        }
         let nodes = target.selected.map { [$0] } ?? []
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.numericPad, .function, .capsLock])
         if modifiers == .command && (event.keyCode == 125 || event.charactersIgnoringModifiers == "o") {
@@ -99,11 +82,7 @@ final class MapInputView: NSView {
             FileItemActions.shared.copy(nodes, pathsOnly: modifiers.contains(.option))
         } else { super.keyDown(with: event) }
     }
-    @objc private func openAggregateFolder() {
-        if let node = target?.selected { target?.open(node) }
-    }
     @objc func copy(_ sender: Any?) {
-        guard aggregateSelectedID == nil || target?.selectedID != aggregateSelectedID else { return }
         if let node = target?.selected { FileItemActions.shared.copy([node]) }
     }
 }

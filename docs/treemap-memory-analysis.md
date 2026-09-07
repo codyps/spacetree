@@ -62,7 +62,7 @@ SPACETREE_MEMORY_BENCHMARK=clustered swift test -c release --filter optionalTree
 
 On this managed environment, tests used `--disable-sandbox --scratch-path /tmp/spacetree-layout-progress-build` and temporary Swift/Clang module caches because the default build/cache paths were not writable.
 
-## Implemented results
+## Initial bounded-renderer results (before detail revision)
 
 The renderer now caps generated regions (including folders and pending work) at 16,384. A two-pass sibling traversal computes aggregate weights/counts without allocating a full child array or sorting more than the budget. Groups represent small siblings or an unexpanded directory, with a four-physical-pixel area threshold and a depth cap of 64. All represented bytes and file counts are retained. A single grouped directory opens directly; a mixed sibling group targets the containing folder and individual files remain accessible in the outline. Group menus and keyboard handling do not treat an aggregate as a mutable file selection.
 
@@ -82,3 +82,17 @@ The equal-folder synthetic overview collapses to one aggregate; this is a delibe
 
 47 tests passed, including byte/count preservation, grouping and folder detail, cancellation, serialized worker replacement, raster colors, hover/selection, and aggregate context menus. Tests and benchmarks ran locally; interactive app resize behavior has not been visually verified. No app was installed or launched, and changes remain uncommitted.
 
+
+## Directory detail and virtual file hits
+
+The follow-up revision replaces the shared first-come budget with proportional per-branch budgets and raises the bounded region capacity to 131,072. Internal directories are prioritized based on their own projected area (16 physical pixels); the fixed depth limit is removed. Small-file tails split into blocks targeting 4096 square points (roughly 64 × 64 points), subject to the region budget, rather than a single large slab. Visible aggregate labels include the containing directory name and file count.
+
+Every hidden file has a compact NodeID and cumulative weight index (12 bytes of element storage per file, plus array capacity). Weighted binary subdivision computes a stable file rectangle at hover time in logarithmic steps, without storing those rectangles or drawing paths. Click and context-menu actions target that resolved file. Highlighting uses its computed rectangle. Visible folder headers still target folders.
+
+The saved Macintosh HD scan now produces 22,356 rendered regions and represents all 7,716,381 files with exactly matching byte totals. Release scene construction took 4.52 seconds; peak RSS was 2418 MiB, already reached during snapshot loading. This is more CPU work than the initial aggressively grouped version because it builds the compact per-file interaction index, but preserves the memory improvement. Full interactive-window rendering has not been visually verified.
+
+Regression coverage includes compact aggregate area, directory labels, 64 distinct file hits within one undrawn block, preservation of later folders after a large preceding subtree, full byte/count accounting, and context menus targeting the resolved file.
+
+Release hover benchmark (2000 pointer moves): million-file p99 0.096 ms, maximum 2.94 ms; skewed 100k-file p99 0.087 ms, maximum 0.27 ms.
+
+All 49 default tests passed after the detail revision. Changes are uncommitted and the interactive app has not been installed or visually verified.
