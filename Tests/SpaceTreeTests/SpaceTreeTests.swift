@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SpaceTreeNative
 @testable import SpaceTree
 
 @Test func compactTreeAggregatesSortsAndReconstructsPaths() throws {
@@ -444,6 +445,81 @@ private func waitForScan(_ target: ScanTarget) async throws {
         #expect(target != nil)
         #expect(target?.roots.count == members.count)
     }
+}
+
+@Test @MainActor func timeMachineAndDiskImageMountsAreHiddenByDefault() {
+    let model = AppModel()
+
+    #expect(!model.showTimeMachineMounts)
+    #expect(!model.showDiskImageMounts)
+    #expect(!model.showAuxiliaryMounts)
+
+    for target in model.visibleTargets {
+        #expect(!target.isTimeMachine)
+        #expect(!target.isDiskImage)
+        #expect(!target.isAuxiliary)
+    }
+
+    let dummyURL = URL(fileURLWithPath: "/tmp/test", isDirectory: true)
+    let standard = ScanTarget(id: "standard", url: dummyURL, name: "Standard", kind: .volume(format: "APFS", isInternal: true, isRemovable: false, isReadOnly: false))
+    let tmTarget = ScanTarget(id: "tm", url: dummyURL, name: "TM", kind: .volume(format: "APFS", isInternal: false, isRemovable: true, isReadOnly: false), isTimeMachine: true)
+    let diTarget = ScanTarget(id: "di", url: dummyURL, name: "DI", kind: .volume(format: "HFS+", isInternal: false, isRemovable: true, isReadOnly: true), isDiskImage: true)
+    let auxTarget = ScanTarget(id: "aux", url: dummyURL, name: "Aux", kind: .volume(format: "APFS", isInternal: false, isRemovable: true, isReadOnly: true), isAuxiliary: true)
+
+    model.targets = [standard, tmTarget, diTarget, auxTarget]
+    #expect(model.visibleTargets.map(\.id) == ["standard"])
+    #expect(model.timeMachineTargetCount == 1)
+    #expect(model.diskImageTargetCount == 1)
+    #expect(model.auxiliaryTargetCount == 1)
+
+    model.showTimeMachineMounts = true
+    #expect(model.visibleTargets.map(\.id) == ["standard", "tm"])
+
+    model.showDiskImageMounts = true
+    #expect(model.visibleTargets.map(\.id) == ["standard", "tm", "di"])
+
+    model.showAuxiliaryMounts = true
+    #expect(model.visibleTargets.map(\.id) == ["standard", "tm", "di", "aux"])
+}
+
+@Test func mountDiscoveryIdentifiesKnownMountTypes() {
+    let mounts = MountDiscovery.mountedFilesystems()
+    for mount in mounts {
+        if mount.url.path.hasPrefix("/Volumes/.timemachine")
+            || mount.url.path.hasPrefix("/Volumes/com.apple.TimeMachine")
+            || mount.device.contains("com.apple.TimeMachine") {
+            #expect(mount.isTimeMachine)
+        }
+        if mount.url.path.hasPrefix("/Library/Developer/CoreSimulator/") {
+            #expect(mount.isAuxiliary)
+            #expect(mount.isDiskImage)
+        }
+    }
+}
+
+@Test func metadataScanEnablesProcessProtectionAndRestoresThreadPolicy() throws {
+    let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    try Data("local".utf8).write(to: tempDir.appendingPathComponent("local.txt"))
+    let previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
+    #expect(previous >= 0)
+    defer { _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous) }
+    #expect(setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_ON) == 0)
+
+    var ptr: UnsafeMutablePointer<st_directory_entry_t>?
+    var count: Int = 0
+    let error = tempDir.withUnsafeFileSystemRepresentation { st_list_directory($0, &ptr, &count) }
+    #expect(error == 0)
+    #expect(count == 1)
+    #expect(getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD) == IOPOL_MATERIALIZE_DATALESS_FILES_ON)
+    st_free_directory_entries(ptr, count)
+
+    let policy = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS)
+    #expect(policy == IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+
+    let triggerPolicy = getiopolicy_np(IOPOL_TYPE_VFS_TRIGGER_RESOLVE, IOPOL_SCOPE_PROCESS)
+    #expect(triggerPolicy == IOPOL_VFS_TRIGGER_RESOLVE_OFF)
 }
 
 private func childMetadata(_ tree: ScanTree, _ nodeID: NodeID) -> [NodeMetadata] {

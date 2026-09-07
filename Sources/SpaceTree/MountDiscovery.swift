@@ -14,6 +14,8 @@ struct MountedFilesystem: Sendable {
     let isRemovable: Bool
     let isReadOnly: Bool
     let apfsContainerUUID: String?
+    let isDiskImage: Bool
+    let isTimeMachine: Bool
     let isAuxiliary: Bool
 }
 
@@ -28,6 +30,12 @@ enum MountDiscovery {
         .volumeTotalCapacityKey,
         .volumeAvailableCapacityKey
     ]
+
+    private struct DeviceIOInfo {
+        let containerUUID: String?
+        let isDiskImage: Bool
+        let hasBackupRole: Bool
+    }
 
     static func mountedFilesystems() -> [MountedFilesystem] {
         var buffer: UnsafeMutablePointer<statfs>?
@@ -49,7 +57,16 @@ enum MountDiscovery {
                 ?? (mountPath == "/" ? "Macintosh HD" : url.lastPathComponent)
             let format = values?.volumeLocalizedFormatDescription ?? filesystemType.uppercased()
             let bsdName = device.hasPrefix("/dev/") ? String(device.dropFirst(5)) : device
-            let containerUUID = filesystemType == "apfs" ? apfsContainerUUID(forBSDName: bsdName) : nil
+            let ioInfo = inspectDevice(bsdName: bsdName)
+            let containerUUID = filesystemType == "apfs" ? ioInfo.containerUUID : nil
+            let timeMachine = isTimeMachine(
+                path: mountPath,
+                device: device,
+                name: name,
+                hasBackupRole: ioInfo.hasBackupRole
+            )
+            let diskImage = ioInfo.isDiskImage || device.hasPrefix("/dev/disk_image")
+            let auxiliary = isAuxiliary(path: mountPath, filesystemType: filesystemType)
 
             results.append(MountedFilesystem(
                 url: url,
@@ -62,29 +79,55 @@ enum MountDiscovery {
                 isRemovable: values?.volumeIsRemovable ?? false,
                 isReadOnly: values?.volumeIsReadOnly ?? ((entry.f_flags & UInt32(MNT_RDONLY)) != 0),
                 apfsContainerUUID: containerUUID,
-                isAuxiliary: isAuxiliary(path: mountPath, filesystemType: filesystemType)
+                isDiskImage: diskImage,
+                isTimeMachine: timeMachine,
+                isAuxiliary: auxiliary
             ))
         }
         return results
     }
 
-    private static func apfsContainerUUID(forBSDName bsdName: String) -> String? {
+    private static func inspectDevice(bsdName: String) -> DeviceIOInfo {
         guard bsdName.hasPrefix("disk"),
-              let matching = IOBSDNameMatching(kIOMainPortDefault, 0, bsdName) else { return nil }
+              let matching = IOBSDNameMatching(kIOMainPortDefault, 0, bsdName) else {
+            return DeviceIOInfo(containerUUID: nil, isDiskImage: false, hasBackupRole: false)
+        }
         var current = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        guard current != 0 else { return nil }
+        guard current != 0 else {
+            return DeviceIOInfo(containerUUID: nil, isDiskImage: false, hasBackupRole: false)
+        }
         defer { IOObjectRelease(current) }
+
+        var containerUUID: String?
+        var isDiskImage = false
+        var hasBackupRole = false
 
         while current != 0 {
             let className = IOObjectCopyClass(current).takeRetainedValue() as String
-            if className == "AppleAPFSContainer",
-               let value = IORegistryEntryCreateCFProperty(
-                   current,
-                   "UUID" as CFString,
-                   kCFAllocatorDefault,
-                   0
-               )?.takeRetainedValue() as? String {
-                return value
+            if className == "AppleAPFSContainer", containerUUID == nil {
+                if let value = IORegistryEntryCreateCFProperty(
+                    current,
+                    "UUID" as CFString,
+                    kCFAllocatorDefault,
+                    0
+                )?.takeRetainedValue() as? String {
+                    containerUUID = value
+                }
+            }
+            if className == "AppleDiskImageDevice" || className == "AppleDiskImagesController" {
+                isDiskImage = true
+            }
+            if !hasBackupRole {
+                if let roles = IORegistryEntryCreateCFProperty(
+                    current,
+                    "Role" as CFString,
+                    kCFAllocatorDefault,
+                    0
+                )?.takeRetainedValue() as? [String] {
+                    if roles.contains("Backup") {
+                        hasBackupRole = true
+                    }
+                }
             }
 
             var parent: io_registry_entry_t = 0
@@ -93,7 +136,23 @@ enum MountDiscovery {
             IOObjectRelease(current)
             current = parent
         }
-        return nil
+
+        return DeviceIOInfo(containerUUID: containerUUID, isDiskImage: isDiskImage, hasBackupRole: hasBackupRole)
+    }
+
+    private static func isTimeMachine(
+        path: String,
+        device: String,
+        name: String,
+        hasBackupRole: Bool
+    ) -> Bool {
+        hasBackupRole
+            || path.hasPrefix("/Volumes/.timemachine")
+            || path.hasPrefix("/Volumes/com.apple.TimeMachine")
+            || path.contains("/Backups.backupdb")
+            || device.contains("com.apple.TimeMachine")
+            || name == "Time Machine Backups"
+            || (device.hasPrefix("//") && (path.contains(".timemachine") || device.lowercased().contains("timemachine")))
     }
 
     private static func isAuxiliary(path: String, filesystemType: String) -> Bool {

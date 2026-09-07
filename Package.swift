@@ -21,7 +21,7 @@ let package = Package(
         ),
         .testTarget(
             name: "SpaceTreeTests",
-            dependencies: ["SpaceTree"],
+            dependencies: ["SpaceTree", "SpaceTreeNative"],
             path: "Tests/SpaceTreeTests"
         )
     ]

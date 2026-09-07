@@ -3,12 +3,30 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/attr.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/vnode.h>
 #include <unistd.h>
+
+static pthread_once_t s_dataless_policy_once = PTHREAD_ONCE_INIT;
+
+static int s_policy_error;
+
+static void st_init_dataless_policy(void) {
+    if (setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_PROCESS, IOPOL_MATERIALIZE_DATALESS_FILES_OFF) != 0
+        || setiopolicy_np(IOPOL_TYPE_VFS_TRIGGER_RESOLVE, IOPOL_SCOPE_PROCESS, IOPOL_VFS_TRIGGER_RESOLVE_OFF) != 0) {
+        s_policy_error = errno;
+    }
+}
+
+int st_prepare_metadata_scan(void) {
+    pthread_once(&s_dataless_policy_once, st_init_dataless_policy);
+    return s_policy_error;
+}
 
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
@@ -121,7 +139,10 @@ static int st_list_directory_fallback(
     for (struct dirent *item = readdir(directory); item != NULL; item = readdir(directory)) {
         if (strcmp(item->d_name, ".") == 0 || strcmp(item->d_name, "..") == 0) continue;
         struct stat metadata;
-        if (fstatat(descriptor, item->d_name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) continue;
+        if (fstatat(descriptor, item->d_name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
+            error = errno;
+            break;
+        }
         error = st_append_stat(entries, count, capacity, item->d_name, &metadata);
         if (error != 0) break;
         errno = 0;
@@ -131,7 +152,7 @@ static int st_list_directory_fallback(
     return error;
 }
 
-int st_list_directory(
+static int st_list_directory_impl(
     const char *path,
     st_directory_entry_t **entries,
     size_t *entry_count
@@ -140,7 +161,7 @@ int st_list_directory(
     *entries = NULL;
     *entry_count = 0;
 
-    int descriptor = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int descriptor = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (descriptor < 0) return errno;
     struct stat directory_metadata;
     if (fstat(descriptor, &directory_metadata) != 0 || !S_ISDIR(directory_metadata.st_mode)) {
@@ -201,7 +222,7 @@ int st_list_directory(
     }
 
     free(buffer);
-    if (error != 0) {
+    if (error != 0 && error != EDEADLK) {
         st_free_directory_entries(result, count);
         result = NULL;
         count = 0;
@@ -223,4 +244,26 @@ void st_free_directory_entries(st_directory_entry_t *entries, size_t entry_count
     if (entries == NULL) return;
     for (size_t index = 0; index < entry_count; index++) free(entries[index].name);
     free(entries);
+}
+
+// Keep the thread override inside synchronous C: Swift tasks can change threads
+// at suspension points. A process policy alone can be overridden by a thread.
+int st_list_directory(const char *path, st_directory_entry_t **entries, size_t *entry_count) {
+    if (path == NULL || entries == NULL || entry_count == NULL) return EINVAL;
+    *entries = NULL;
+    *entry_count = 0;
+    int error = st_prepare_metadata_scan();
+    if (error != 0) return error;
+    int previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD);
+    if (previous < 0) return errno;
+    if (setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF) != 0) return errno;
+    error = st_list_directory_impl(path, entries, entry_count);
+    int restore = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous);
+    if (restore != 0 && error == 0) {
+        error = errno;
+        st_free_directory_entries(*entries, *entry_count);
+        *entries = NULL;
+        *entry_count = 0;
+    }
+    return error;
 }

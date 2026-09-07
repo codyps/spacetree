@@ -27,6 +27,8 @@ final class ScanTarget: Identifiable {
     var totalCapacity: Int64?
     var availableCapacity: Int64?
     var isAvailable: Bool
+    var isDiskImage: Bool
+    var isTimeMachine: Bool
     var isAuxiliary: Bool
     let persistResults: Bool
     var state: State = .idle
@@ -55,6 +57,8 @@ final class ScanTarget: Identifiable {
         totalCapacity: Int64? = nil,
         availableCapacity: Int64? = nil,
         isAvailable: Bool = true,
+        isDiskImage: Bool = false,
+        isTimeMachine: Bool = false,
         isAuxiliary: Bool = false,
         persistResults: Bool = true
     ) {
@@ -66,6 +70,8 @@ final class ScanTarget: Identifiable {
         self.totalCapacity = totalCapacity
         self.availableCapacity = availableCapacity
         self.isAvailable = isAvailable
+        self.isDiskImage = isDiskImage
+        self.isTimeMachine = isTimeMachine
         self.isAuxiliary = isAuxiliary
         self.persistResults = persistResults
         self.progress = ScanProgress(currentPath: url.path, itemCount: 0, bytesFound: 0, unreadableCount: 0)
@@ -83,12 +89,24 @@ final class ScanTarget: Identifiable {
         case .folder: return "Folder"
         case .apfsContainer(let volumeCount, let isInternal, let isRemovable, let isReadOnly):
             var parts = ["APFS container", "\(volumeCount) mounted \(volumeCount == 1 ? "volume" : "volumes")"]
-            parts.append(isInternal ? "Internal" : (isRemovable ? "Removable" : "External"))
+            if isTimeMachine {
+                parts.append("Time Machine")
+            } else if isDiskImage {
+                parts.append("Disk image")
+            } else {
+                parts.append(isInternal ? "Internal" : (isRemovable ? "Removable" : "External"))
+            }
             if isReadOnly { parts.append("Read only") }
             return parts.joined(separator: " · ")
         case .volume(let format, let isInternal, let isRemovable, let isReadOnly):
             var parts = [format]
-            parts.append(isInternal ? "Internal" : (isRemovable ? "Removable" : "External"))
+            if isTimeMachine {
+                parts.append("Time Machine")
+            } else if isDiskImage {
+                parts.append("Disk image")
+            } else {
+                parts.append(isInternal ? "Internal" : (isRemovable ? "Removable" : "External"))
+            }
             if isReadOnly { parts.append("Read only") }
             return parts.joined(separator: " · ")
         }
@@ -335,6 +353,8 @@ final class AppModel {
     var targets: [ScanTarget] = []
     var viewingTargetID: String?
     var showAuxiliaryMounts = false
+    var showTimeMachineMounts = false
+    var showDiskImageMounts = false
 
     init() {
         refreshMountedItems()
@@ -347,8 +367,18 @@ final class AppModel {
     }
 
     var scanningCount: Int { targets.count { $0.state == .scanning } }
-    var visibleTargets: [ScanTarget] { targets.filter { showAuxiliaryMounts || !$0.isAuxiliary } }
+    var visibleTargets: [ScanTarget] {
+        targets.filter { target in
+            if target.isAuxiliary { return showAuxiliaryMounts }
+            if target.isTimeMachine { return showTimeMachineMounts }
+            if target.isDiskImage { return showDiskImageMounts }
+            return true
+        }
+    }
     var hiddenAuxiliaryCount: Int { targets.count { $0.isAuxiliary } }
+    var auxiliaryTargetCount: Int { targets.count { $0.isAuxiliary } }
+    var timeMachineTargetCount: Int { targets.count { !$0.isAuxiliary && $0.isTimeMachine } }
+    var diskImageTargetCount: Int { targets.count { !$0.isAuxiliary && !$0.isTimeMachine && $0.isDiskImage } }
 
     func refreshMountedItems() {
         for target in targets where target.isVolume { target.isAvailable = false }
@@ -387,6 +417,10 @@ final class AppModel {
                     isReadOnly: primary.isReadOnly
                 )
             let roots = ordered.map { ScanRoot(url: $0.url, name: $0.name) }
+            let isAux = !ordered.isEmpty && ordered.allSatisfy(\.isAuxiliary)
+            let isTM = !ordered.isEmpty && ordered.contains(where: \.isTimeMachine) && ordered.allSatisfy { $0.isTimeMachine || $0.isAuxiliary }
+            let isDI = !ordered.isEmpty && ordered.allSatisfy(\.isDiskImage)
+
             if let existing = targets.first(where: { $0.id == id }) {
                 existing.name = name
                 existing.kind = kind
@@ -395,7 +429,9 @@ final class AppModel {
                 existing.totalCapacity = primary.totalCapacity
                 existing.availableCapacity = primary.availableCapacity
                 existing.isAvailable = true
-                existing.isAuxiliary = ordered.allSatisfy(\.isAuxiliary)
+                existing.isDiskImage = isDI
+                existing.isTimeMachine = isTM
+                existing.isAuxiliary = isAux
             } else {
                 let target = ScanTarget(
                     id: id,
@@ -405,7 +441,9 @@ final class AppModel {
                     roots: roots,
                     totalCapacity: primary.totalCapacity,
                     availableCapacity: primary.availableCapacity,
-                    isAuxiliary: ordered.allSatisfy(\.isAuxiliary)
+                    isDiskImage: isDI,
+                    isTimeMachine: isTM,
+                    isAuxiliary: isAux
                 )
                 targets.append(target)
                 target.restoreSnapshot()

@@ -19,6 +19,7 @@ enum DiskScannerError: LocalizedError {
     case rootIsSymbolicLink(URL)
     case rootIsNotDirectory(URL)
     case rootCannotBeRead(URL, Int32)
+    case rootIsDataless(URL)
     case tooManyEntries
 
     var errorDescription: String? {
@@ -26,6 +27,7 @@ enum DiskScannerError: LocalizedError {
         case .rootIsSymbolicLink(let url): return "SpaceTree will not scan the symbolic-link root at \(url.path)."
         case .rootIsNotDirectory(let url): return "The scan root is not a directory: \(url.path)"
         case .rootCannotBeRead(let url, let error): return "The scan root cannot be read: \(url.path) (errno \(error))"
+        case .rootIsDataless(let url): return "The scan root is an unmaterialized dataless cloud folder: \(url.path)"
         case .tooManyEntries: return "The scan contains more entries than the compact tree can address."
         }
     }
@@ -158,6 +160,9 @@ enum DiskScanner {
         progress: @escaping @Sendable (ScanProgress) async -> Void
     ) async throws -> ScanTree {
         guard !roots.isEmpty else { throw CocoaError(.fileReadNoSuchFile) }
+        let policyError = st_prepare_metadata_scan()
+        guard policyError == 0 else { throw DiskScannerError.rootCannotBeRead(roots[0].url, policyError) }
+
         let standardizedRoots = roots.map { ScanRoot(url: $0.url.standardizedFileURL, name: $0.name) }
         let rootStats = try standardizedRoots.map { root in
             (root, try rootMetadata(at: root.url))
@@ -315,14 +320,25 @@ enum DiskScanner {
     }
 
     private static func rootMetadata(at url: URL) throws -> (device: UInt64, inode: UInt64) {
+        // No suspension while the thread policy is overridden, including path lookup.
+        let previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
+        guard previous >= 0 else { throw DiskScannerError.rootCannotBeRead(url, errno) }
+        guard setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF) == 0 else {
+            throw DiskScannerError.rootCannotBeRead(url, errno)
+        }
+        defer { _ = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous) }
         var metadata = stat()
         let result = url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return Int32(EINVAL) }
             return lstat(path, &metadata)
         }
-        guard result == 0 else { throw DiskScannerError.rootCannotBeRead(url, errno) }
+        guard result == 0 else {
+            if errno == EDEADLK { throw DiskScannerError.rootIsDataless(url) }
+            throw DiskScannerError.rootCannotBeRead(url, errno)
+        }
         if (metadata.st_mode & S_IFMT) == S_IFLNK { throw DiskScannerError.rootIsSymbolicLink(url) }
         guard (metadata.st_mode & S_IFMT) == S_IFDIR else { throw DiskScannerError.rootIsNotDirectory(url) }
+        if metadata.st_flags & UInt32(SF_DATALESS) != 0 { throw DiskScannerError.rootIsDataless(url) }
         return (UInt64(metadata.st_dev), UInt64(metadata.st_ino))
     }
 

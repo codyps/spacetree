@@ -107,11 +107,27 @@ private struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                HStack(spacing: 10) {
+                HStack(alignment: .center, spacing: 14) {
                     Text("\(model.visibleTargets.count) items")
                         .foregroundStyle(.secondary)
-                    if model.hiddenAuxiliaryCount > 0 {
-                        Toggle("Show \(model.hiddenAuxiliaryCount) developer/system mounts", isOn: Binding(
+                    if model.timeMachineTargetCount > 0 {
+                        Toggle("Time Machine (\(model.timeMachineTargetCount))", isOn: Binding(
+                            get: { model.showTimeMachineMounts },
+                            set: { model.showTimeMachineMounts = $0 }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                    }
+                    if model.diskImageTargetCount > 0 {
+                        Toggle("Disk images (\(model.diskImageTargetCount))", isOn: Binding(
+                            get: { model.showDiskImageMounts },
+                            set: { model.showDiskImageMounts = $0 }
+                        ))
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                    }
+                    if model.auxiliaryTargetCount > 0 {
+                        Toggle("Developer/system (\(model.auxiliaryTargetCount))", isOn: Binding(
                             get: { model.showAuxiliaryMounts },
                             set: { model.showAuxiliaryMounts = $0 }
                         ))
@@ -157,7 +173,7 @@ private struct ScanTargetCard: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(iconColor.opacity(0.14))
-                Image(systemName: target.isVolume ? "externaldrive.fill" : "folder.fill")
+                Image(systemName: iconName)
                     .font(.system(size: 23))
                     .foregroundStyle(iconColor)
             }
@@ -263,8 +279,17 @@ private struct ScanTargetCard: View {
         }
     }
 
+    private var iconName: String {
+        guard target.isVolume else { return "folder.fill" }
+        if target.isTimeMachine { return "clock.arrow.circlepath" }
+        if target.isDiskImage { return "opticaldisc" }
+        return "externaldrive.fill"
+    }
+
     private var iconColor: Color {
         guard target.isVolume else { return .blue }
+        if target.isTimeMachine { return .cyan }
+        if target.isDiskImage { return .indigo }
         if target.kindDescription.localizedCaseInsensitiveContains("APFS") { return .purple }
         return .teal
     }

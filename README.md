@@ -69,7 +69,7 @@ Then quit and reopen SpaceTree before scanning again.
 
 ### Mounted filesystems
 
-SpaceTree uses the native mount table and I/O Registry directly; it does not invoke `diskutil`. Mounted APFS filesystems that share an `AppleAPFSContainer` UUID—such as the startup System, Data, VM, Preboot, Nix, and development volumes—are combined into one scan target. External APFS containers and non-APFS filesystems remain separate. Developer simulator and low-level system mounts are hidden behind the dashboard's **Show developer/system mounts** checkbox.
+SpaceTree uses the native mount table and I/O Registry directly; it does not invoke `diskutil`. Mounted APFS filesystems that share an `AppleAPFSContainer` UUID—such as the startup System, Data, VM, Preboot, Nix, and development volumes—are combined into one scan target. External APFS containers and non-APFS filesystems remain separate. Time Machine backup volumes, mounted snapshots, disk images, and developer simulator/low-level system mounts are excluded by default from the dashboard and "Scan All", but can be enabled on demand with the dashboard's **Time Machine**, **Disk images**, and **Developer/system** checkboxes.
 
 Container scans visit each constituent filesystem exactly once and stop at mount boundaries, preventing nested mounts from being counted twice.
 
@@ -86,3 +86,17 @@ swift test
 ```
 
 The tests cover size aggregation, treemap geometry, real filesystem scanning, hard-link deduplication, symlink-loop avoidance, independent scans, and result retention.
+
+### Cloud files and scan completeness
+
+Scanning reads filesystem metadata, never regular-file contents. SpaceTree requires
+macOS's no-materialization policy before scanning and applies a synchronous thread
+override around directory enumeration and root metadata lookup. If protection cannot
+be enabled, the operation fails. A folder whose listing requires materialization is
+reported as unreadable, not as successfully scanned and empty. Cloud totals can
+therefore be incomplete; logical size does not mean downloaded disk usage.
+
+This prevents scan-triggered dataless materialization through macOS File Provider;
+it does not suppress independent provider syncing or promise zero provider/network
+activity. Excluding known cloud roots entirely would also hide locally downloaded
+files and their disk usage. A universal provider-root exclusion is not implemented.

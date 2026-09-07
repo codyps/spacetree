@@ -23,6 +23,9 @@ typedef struct {
     st_entry_kind_t kind;
 } st_directory_entry_t;
 
+// Enables process scan protections; returns errno on failure.
+int st_prepare_metadata_scan(void);
+
 // Returns 0 on success and an errno value on failure.
 int st_list_directory(
     const char *path,
