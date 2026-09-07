@@ -139,6 +139,51 @@ struct FileInteractionTests {
         #expect(menu.items.first?.title == "Open")
     }
 
+    @Test func trashMarksSuccessWithoutReplacingTreeAndRetainsPartialFailure() throws {
+        let (target, folder, file, sibling) = try fixture()
+        target.state = .complete
+        let tree = try #require(target.tree)
+        target.open(tree.metadata(for: folder))
+        target.selectedID = file
+        enum Failure: Error { case denied }
+        var attempts = 0
+        do {
+            try FileItemActions.shared.moveConfirmedItemsToTrash(
+                [tree.metadata(for: folder), tree.metadata(for: sibling)], target: target
+            ) { _ in
+                attempts += 1
+                if attempts == 2 { throw Failure.denied }
+            }
+            Issue.record("Expected second item to fail")
+        } catch Failure.denied { }
+        #expect(target.tree?.generation == tree.generation)
+        #expect(target.state == .complete)
+        #expect(target.currentID == folder)
+        #expect(target.isTrashed(folder))
+        #expect(target.isTrashed(file))
+        #expect(!target.isTrashed(sibling))
+        #expect(target.selected == nil)
+        #expect(target.hasFilesystemChanges)
+        #expect(target.root?.allocatedBytes == tree.allocatedBytes(of: tree.rootID))
+        #expect(FileItemActions.shared.menu(for: [tree.metadata(for: file)], target: target).items.first?.isEnabled == false)
+        target.tree = try fixture().0.tree
+        #expect(target.trashedNodeIDs.isEmpty)
+    }
+
+    @Test func failedTrashDoesNotMarkOrRefresh() throws {
+        let (target, _, file, _) = try fixture()
+        target.state = .complete
+        let tree = try #require(target.tree)
+        enum Failure: Error { case denied }
+        do {
+            try FileItemActions.shared.moveConfirmedItemsToTrash([tree.metadata(for: file)], target: target) { _ in throw Failure.denied }
+        } catch Failure.denied { }
+        #expect(target.trashedNodeIDs.isEmpty)
+        #expect(!target.hasFilesystemChanges)
+        #expect(target.tree?.generation == tree.generation)
+        #expect(target.state == .complete)
+    }
+
     @Test func arrowKeysExpandAndCollapseTheNativeHierarchy() throws {
         let (target, folder, _, _) = try fixture()
         let (view, coordinator) = outline(for: target)

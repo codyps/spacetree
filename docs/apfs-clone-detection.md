@@ -1,149 +1,140 @@
-# APFS clone detection
+# APFS clone detection during scans
 
-Findings on detecting APFS cloned files during scans so their blocks are not
-counted once per clone. Verified empirically on macOS 26 (Darwin 25.6.0)
-against the system APFS data volume and a freshly created APFS volume image.
+Verified 2026-09-07 on macOS 26 / Darwin 25.6.0, using generated fixtures on
+both the system Data volume (`/tmp`) and the APFS volume containing this repo.
+This is an investigation; the scanner does not yet collect clone metadata.
 
-## Problem
+## What we can detect cheaply
 
-APFS clones (from `clonefile(2)`, `cp -c`, or Finder duplication) are separate
-inodes that share physical extents copy-on-write. Every clone reports full
-`st_blocks`/allocated size through `stat`, so summing per-file sizes counts
-shared blocks once per clone. Clones have `st_nlink == 1` and distinct file
-IDs, so the existing hard-link dedup (`FileIdentity` from `link_count > 1` in
-`DiskScanner.bulkEntries`, grouped in `ScanTreeBuilder.finalize()`) cannot see
-them. Hard links to a cloned file share its clone family; the two dedups
-compose.
+APFS clones have separate inodes but initially share file data copy-on-write.
+The scanner currently records device/inode identities for hard links and uses
+allocated sizes for ordinary files. That cannot identify clones: each clone
+can report the full allocated size despite sharing storage.
 
-## Detection API
+Request these attributes in the existing `getattrlistbulk` call:
 
-`getattrlist` extended attributes, requested through the `forkattr` bitmap
-with the `FSOPT_ATTR_CMN_EXTENDED` (0x20) option flag:
+| Attribute | Wire type | Purpose |
+| --- | --- | --- |
+| `ATTR_CMNEXT_CLONEID` | `uint64_t` | Identify a data stream shared by full clones |
+| `ATTR_CMNEXT_EXT_FLAGS` | `uint64_t` | Distinguish possible sharing from sharing all blocks |
+| `ATTR_CMNEXT_CLONE_REFCNT` | `uint32_t` | Full-clone reference count, across the volume |
 
-- `ATTR_CMNEXT_CLONEID` (0x100) — `u_int64_t` identifying the file's data
-  stream. Pure clones of one another share the same ID. This is the grouping
-  key.
-- `ATTR_CMNEXT_EXT_FLAGS` (0x200) — `u_int32_t` of sharing flags. Names are
-  documented in `getattrlist(2)` but the constants are not in the public
-  header; measured values: `EF_MAY_SHARE_BLOCKS = 0x1`,
-  `EF_SHARES_ALL_BLOCKS = 0x40` (which implies `EF_MAY_SHARE_BLOCKS`).
-- `ATTR_CMNEXT_CLONE_REFCNT` (0x1000) — `u_int32_t`, number of full clones
-  sharing this file's blocks (volume-wide, not scan-wide).
-- `ATTR_CMNEXT_LINKID` (0x10) — hard-link identity; a modern replacement for
-  `ATTR_FILE_LINKCOUNT` in bulk scans (see side finding below).
+Set `forkattr` to those bits and add `FSOPT_ATTR_CMN_EXTENDED`. Existing
+`commonattr` and `fileattr` requests remain in place. File attributes and
+extended common attributes occupy **separate bitmaps**; there is no need for
+a second directory enumeration. A live query using the scanner's exact common
+and file attribute masks, its existing options, and these additions returned
+all five fixture entries successfully, with metadata scan protection enabled.
 
-Without `FSOPT_ATTR_CMN_EXTENDED` the kernel rejects these bits with `EINVAL`.
-`getattrlistbulk` accepts the same attributes under the same flag, so clone
-data can stay in bulk-scan form.
+Apple documents `EF_MAY_SHARE_BLOCKS` and `EF_SHARES_ALL_BLOCKS` in
+`getattrlist(2)`. The latter implies the former. Observed values were `0x1`
+and `0x40`; these flag constants were not found in the public SDK headers
+examined. Treat those numeric encodings as an explicitly documented
+compatibility assumption if used, rather than public header definitions.
 
-## Verified semantics
+Check `VOL_CAP_FMT_CLONE_MAPPING` in the volume's valid format capabilities;
+it describes clone tracking, unlike `VOL_CAP_INT_CLONE`, which describes
+support for creating clones. Also check each record's returned-attribute
+bitmap. Unsupported or unavailable metadata must mean **unknown**, not
+“unshared”; packed zeroes alone do not establish support. Support and behavior
+on other APFS volumes/OS versions still require validation.
 
-Fixture: 4 MiB random `orig`; `clone1`, `clone2` via `cp -c`; `clone_of_clone`
-cloned from `clone1`; `diverged` cloned then appended 1 MiB; `normalcopy` via
-plain `cp`; `hardlink` via `ln`.
+## Live results
 
-| file                | clone ID   | ext flags | refcnt | extent reality (`F_LOG2PHYS_EXT`)        |
-| ------------------- | ---------- | --------- | ------ | ---------------------------------------- |
-| orig                | family ID  | 0x41      | 4      | shared with all clones                   |
-| clone1 / clone2     | family ID  | 0x41      | 4      | identical extent map to orig             |
-| clone_of_clone      | family ID  | 0x41      | 4      | identical extent map to orig             |
-| hardlink            | family ID  | 0x41      | 4      | same inode as orig                       |
-| diverged            | own ID     | 0x1       | 1      | shared 4 MiB prefix + unique tail extents |
-| normalcopy          | unique     | 0x0       | 0      | physically distinct                      |
+The probe created a 4 MiB random file, two `clonefile` copies, a hard link,
+and an independent copy written using `write` (avoiding a copy utility that
+might clone automatically). One clone had 1 MiB appended. All test files
+were removed after the probe; no existing user files were inspected or changed.
 
-Consequences:
+| Entry | Inode | Clone ID | Flags | Refcount | Allocated size |
+| --- | --- | --- | --- | --- | --- |
+| Original | A | X | `0x41` | 2 | 4 MiB |
+| Full clone | B | X | `0x41` | 2 | 4 MiB |
+| Hard link to original | A | X | `0x41` | 2 | 4 MiB |
+| Modified clone | C | Y | `0x1` | 1 | 5 MiB |
+| Independent copy | D | Z | `0x0` | 1 | 4 MiB |
 
-- Grouping by clone ID finds exactly the *pure* clone families. A partially
-  diverged clone gets its own ID and `EF_MAY_SHARE_BLOCKS` only; it is
-  excluded from the family, so counting it normally overstates usage by its
-  shared prefix but never understates. Exact partial accounting would require
-  per-file extent walks via `fcntl(F_LOG2PHYS_EXT)` (verified working on
-  APFS: contig device-offset runs are returned, and clones show identical
-  maps). That is a possible later refinement, not needed for parity with the
-  hard-link behavior.
-- `CLONE_REFCNT` counts volume-wide peers, including clones outside the scan
-  scope. It must not drive zeroing; it is only a UI hint ("N other clones on
-  this volume").
+The first physical extent, queried using `F_LOG2PHYS_EXT`, was identical for
+original, full clone, hard link, and modified clone; the independent copy had
+a different physical address. This verifies partial sharing after divergence,
+but the probe did not walk every extent or measure snapshot-held storage.
 
-## Volume support varies
+The implications are:
 
-Clone tracking is a per-volume on-disk feature (`VOL_CAP_FMT_CLONE_MAPPING`).
-The system data volume reports clone IDs as described above. A freshly created
-`hdiutil` APFS volume image returned no sharing information at all: every file
-got a distinct sentinel-looking ID and `refcnt=0`. Non-APFS filesystems will
-not implement the attributes.
+- A full-clone family is discoverable without opening or reading every file.
+  Group within the same filesystem, using clone ID and returned metadata.
+- A modified clone can receive a new clone ID while retaining shared extents.
+  Clone-ID grouping alone therefore cannot detect all shared-byte overlap.
+- Hard links do not add full-clone references in this fixture. Deduplicate
+  inode identities before counting distinct clone members.
+- Refcount includes the current data stream in this fixture and can include
+  members outside the scan root. Do not display it as “N other clones” or use
+  it to divide a file's allocated size.
+- These attributes describe current sharing, not historical copy provenance.
+  They cannot say which pathname was the source of a clone operation.
 
-Gate at scan start: issue one `getattrlist` on a probe file with
-`FSOPT_PACK_INVAL_ATTRS | FSOPT_ATTR_CMN_EXTENDED` and
-`ATTR_CMN_RETURNED_ATTRS`, then check whether the `CLONEID` bit is present in
-`returned.forkattr`. Unsupported volumes pack 0; skip clone grouping there.
+## Recommended integration
 
-## Integration plan
+1. Extend `st_directory_entry_t` and the bulk parser with clone ID, 64-bit
+   flags, refcount, and explicit validity information. Attribute records use
+   four-byte packing; use checked offsets/`memcpy`, not native struct alignment.
+2. Keep the existing metadata-only/no-follow/no-materialization scan policies.
+   If clone attributes are unsupported, retain ordinary scanning. The
+   `readdir`/`fstatat` fallback has no open per-file descriptor to reuse for
+   `fgetattrlist`; initially report clone state as unknown there.
+3. Preserve relevant metadata compactly, preferably in a side table for
+   sharing candidates, and group by filesystem/device identity plus clone ID.
+   Keep hard-link identity and clone identity separate. Account for additional
+   retained memory before adding fields to every node in a multi-million-file
+   scan. Persisted clone data would require snapshot-format handling too.
+4. First expose “full clone” and “may share blocks” annotations plus navigation
+   to other observed members. Keep per-file allocated sizes visible. A later
+   distinct-data estimate can count full-clone data once, but must distinguish
+   this from per-directory allocation and bytes reclaimable by deletion.
+5. Reconcile sharing groups across the complete scan generation when refreshing
+   subtrees: a group's other members may live outside the refreshed directory.
 
-The extended flag reinterprets the entire `forkattr` bitmap as `ATTR_CMNEXT_*`
-bits, and several `ATTR_FILE_*` bits alias `ATTR_CMNEXT_*` bits, so file sizes
-cannot ride in the same call:
+Blindly reusing the hard-link duplicate flag and zeroing clone sizes would
+obscure partial sharing and imply more certainty about reclaimable bytes than
+these metadata provide. Clones, hard links, and snapshots can retain data after
+a pathname is deleted. Stream-level clone identity also should not be treated
+as proof of identical ownership of all ancillary file metadata/resource forks.
 
-| forkattr bit | as ATTR_FILE_*        | as ATTR_CMNEXT_*   |
-| ------------ | --------------------- | ------------------ |
-| 0x004        | `ATTR_FILE_ALLOCSIZE` | `RELPATH`          |
-| 0x100        | `ATTR_FILE_FORKLIST`  | `CLONEID`          |
-| 0x200        | `ATTR_FILE_DATALENGTH`| `EXT_FLAGS`        |
+## Exact partial sharing is a separate, more expensive feature
 
-Therefore `SpaceTreeNative.c` should enumerate each directory twice:
+`fcntl(F_LOG2PHYS_EXT)` maps a requested file offset to a physical offset and
+contiguous run length. Walking and intersecting physical ranges can identify
+shared extents among inspected files. The first-run probe worked without root
+on both tested volumes, but a complete implementation must handle sparse or
+unmapped ranges, short runs, compressed/dataless files, filesystem/device scope,
+and files changing during inspection. It does not supply snapshot reference
+counts or guarantee space recovered by deleting a selected set of files.
 
-1. Size pass (existing call, with replacements from the side finding):
-   `ATTR_CMN_RETURNED_ATTRS | NAME | DEVID | OBJTYPE | MODTIME | FILEID` plus
-   `ATTR_FILE_DATALENGTH | ATTR_FILE_ALLOCSIZE`.
-2. Identity pass: same common attributes, `forkattr =
-   LINKID | CLONEID | EXT_FLAGS | CLONE_REFCNT`, options including
-   `FSOPT_ATTR_CMN_EXTENDED`. Match records between passes by `ATTR_CMN_FILEID`.
+This requires per-file opens and potentially many extent queries. Offer it as
+an explicit deeper analysis of selected sharing candidates, after benchmarking,
+rather than adding it to every file in the default scan. Content hashing is
+unnecessary for detecting physical sharing and would defeat metadata-only scans.
 
-`st_directory_entry_t` grows `clone_id`, `ext_flags`, and `clone_refcnt`
-fields. On the Swift side, thread a clone identity
-(`(realDevice, cloneID)`, skipping zero IDs) through `EntryMetadata`, and in
-`ScanTreeBuilder.finalize()` run it as a second grouping dimension alongside
-`FileIdentity`:
+## Corrections to the previous note
 
-- Reuse the canonical-member and `.duplicateReference` machinery; a clone
-  group marks all members after the path-ordered canonical one as duplicates.
-- Only group when at least two members are visible in the scan, mirroring the
-  hard-link scope rule (peers outside the scan root still occupy their own
-  subtrees).
-- `DiskScanner.refresh()` must fall back to a full rescan when the existing
-  tree contains clone groups, exactly as it does for
-  `hardLinkReferenceCount` today, because partial subtree scans cannot see
-  cross-tree sharing.
-- The `readdir`+`fstatat` fallback path has no clone data. It can obtain the
-  same fields per file via `fgetattrlist` on the descriptor `fstatat` already
-  used, or simply run without clone dedup.
+The previous version incorrectly described extended flags as 32-bit, required
+two directory passes because of overlapping bit values, and reported a normal
+copy's refcount as zero. Current Apple source and correctly sized live parsing
+support the types and single-pass query above; the ordinary copy returned one.
 
-Record layout notes for parsing: `attribute_set_t` is five `u_int32_t` values
-(commonattr, volattr, dirattr, fileattr, forkattr — 20 bytes) after the
-leading record length; returned fields are packed in attribute-list order with
-4-byte alignment (`u_int64_t` fields are only 4-byte aligned, and padding
-appears after 8-byte fields in single `getattrlist` records).
+The previous claim that `ATTR_FILE_LINKCOUNT`/`ATTR_FILE_TOTALSIZE` always make
+the bulk fast path fail with `E2BIG` was not reproduced. Both attributes,
+the scanner's combined file mask `0x7`, and that mask plus clone metadata
+succeeded. No replacement of the existing size/link-count attributes is
+justified by the current evidence. Earlier disk-image results have not been
+revalidated and should not be used to infer support on other volumes.
 
-## Side finding: the bulk fast path is dead on this OS
+## Primary references
 
-On this macOS build, `getattrlistbulk` fails with `E2BIG` whenever
-`ATTR_FILE_LINKCOUNT` or `ATTR_FILE_TOTALSIZE` is requested — for any buffer
-size from 16 KiB to 512 KiB, with or without `FSOPT_PACK_INVAL_ATTRS` /
-`FSOPT_RETURN_REALDEV`, on plain directories with no mount points and with
-the dataless-materialization policy set. That is exactly the attribute set
-`st_list_directory_impl` requests, so the C layer falls into the
-`readdir`+`fstatat` fallback for every directory on every scan. Results stay
-correct, which is why this went unnoticed, but the scan pays per-entry
-`fstatat` costs throughout.
+- [Apple getattrlist manual](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/man/man2/getattrlist.2): attribute types, sharing semantics, capabilities.
+- [Apple attribute definitions](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/sys/attr.h): separate bitmaps, attribute and capability values.
+- [Apple attribute packing implementation](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/vfs/vfs_attrlist.c): 64-bit clone ID and extended flags; 32-bit clone refcount.
+- [Apple fcntl manual](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/man/man2/fcntl.2): `F_LOG2PHYS_EXT` inputs and outputs.
 
-The fix falls out of the clone work: replace `ATTR_FILE_LINKCOUNT` with
-`ATTR_CMNEXT_LINKID` from the identity pass, and `ATTR_FILE_TOTALSIZE` with
-`ATTR_FILE_DATALENGTH` (verified working in bulk). `ATTR_FILE_ALLOCSIZE`
-already works in bulk and can stay in the size pass.
-
-## References
-
-- `getattrlist(2)` man page (ATTR_CMNEXT_CLONEID / EXT_FLAGS / CLONE_REFCNT,
-  FSOPT_ATTR_CMN_EXTENDED, VOL_CAP_FMT_CLONE_MAPPING)
-- `xnu` `bsd/sys/attr.h` (attribute bit values, capability bits)
-- `fcntl(F_LOG2PHYS_EXT)` for physical extent maps
+Local verification also used the installed Xcode macOS SDK's `sys/attr.h` and
+`usr/share/man/man2/{getattrlist,fcntl}.2`. Upstream `main` links may change.

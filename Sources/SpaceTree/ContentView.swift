@@ -381,6 +381,14 @@ private struct ExplorerToolbar: View {
                     .help("Changes detected")
             }
 
+            if !target.trashedNodeIDs.isEmpty {
+                Text("\(target.trashedNodeIDs.count) trashed · totals pending")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                Button("Update", action: target.rescan)
+                    .disabled(target.state == .scanning)
+            }
+
             ScanInfoBar(target: target)
                 .fixedSize()
 

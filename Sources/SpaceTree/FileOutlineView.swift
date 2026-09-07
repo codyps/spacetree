@@ -67,6 +67,7 @@ struct FileOutlineView: NSViewRepresentable {
         var syncing = false
         var lastSelection: NodeID?
         var lastReveal = -1
+        var lastTrashed: Set<NodeID> = []
 
         init(target: ScanTarget) { self.target = target }
         func item(_ id: NodeID) -> Item {
@@ -100,6 +101,15 @@ struct FileOutlineView: NSViewRepresentable {
                 roots = newRoots
                 currentID = target.currentID
                 outline.reloadData()
+            }
+            if lastTrashed != target.trashedNodeIDs {
+                // Refresh only materialized rows, preserving expansion and scroll position.
+                let visible = outline.rows(in: outline.visibleRect)
+                if visible.location != NSNotFound, visible.length > 0 {
+                    outline.reloadData(forRowIndexes: IndexSet(integersIn: visible.location..<NSMaxRange(visible)),
+                                       columnIndexes: IndexSet(integersIn: 0..<outline.numberOfColumns))
+                }
+                lastTrashed = target.trashedNodeIDs
             }
             if reload || lastSelection != target.selectedID || lastReveal != revealRequest {
                 if let id = target.selectedID, let tree, tree.contains(tree.handle(for: id)),
@@ -153,7 +163,9 @@ struct FileOutlineView: NSViewRepresentable {
             case "size": text = node.allocatedBytes.formattedByteCount
             default: text = node.modifiedAt?.formatted(date: .abbreviated, time: .omitted) ?? "—"
             }
-            cell.textField?.stringValue = text
+            let trashed = target.isTrashed(item.id)
+            cell.textField?.stringValue = text + (trashed && identifier.rawValue == "name" ? " — Trashed" : "")
+            cell.textField?.textColor = trashed ? .systemRed : .labelColor
             cell.toolTip = node.url.path
             return cell
         }
@@ -213,7 +225,7 @@ struct FileOutlineView: NSViewRepresentable {
         var selectedNodes: [NodeMetadata] {
             guard let outline, let tree else { return [] }
             return outline.selectedRowIndexes.compactMap { row in
-                (outline.item(atRow: row) as? Item).map { tree.metadata(for: $0.id) }
+                (outline.item(atRow: row) as? Item).flatMap { target.isTrashed($0.id) ? nil : tree.metadata(for: $0.id) }
             }
         }
         func outlineViewSelectionDidChange(_ notification: Notification) {

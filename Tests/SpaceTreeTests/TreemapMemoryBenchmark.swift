@@ -58,6 +58,13 @@ import Testing
                                       in: CGRect(x: 0, y: 0, width: 1200, height: 800), displayScale: 2)
     getrusage(RUSAGE_SELF, &usage)
     print("Saved snapshot scene: elapsed=\(start.duration(to: .now)) regions=\(scene.tiles.count + scene.folders.count) representedFiles=\(scene.representedFileCount) peakRSSMiB=\(Double(usage.ru_maxrss) / 1_048_576)")
+    if let tile = scene.tiles.last(where: { scene.entries[$0.entryIndex].virtualRange != nil }),
+       let hit = scene.hit(at: CGPoint(x: tile.rect.midX, y: tile.rect.midY)) {
+        let markerStart = ContinuousClock.now
+        let markers = try scene.deletionRects(for: [hit.entry.nodeID])
+        print("Saved snapshot deletion marker near end of virtual index: \(markerStart.duration(to: .now))")
+        #expect(markers == [hit.rect])
+    }
     #expect(scene.representedFileCount == tree.fileCount(of: tree.rootID))
     #expect(scene.totalSize == tree.allocatedBytes(of: tree.rootID))
     #expect(scene.tiles.count + scene.folders.count <= TreemapScene.maximumRegions)

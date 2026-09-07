@@ -69,7 +69,7 @@ Then quit and reopen SpaceTree before scanning again.
 - Space: Quick Look; Return: rename the selected item
 - `⌘C`: copy selected files; `⌥⌘C`: copy their pathnames
 - Right-click or Control-click either view for Open, Reveal in Finder, Quick Look, Copy, Copy Pathname, Rename, and Move to Trash
-- `⌘⌫`: move selected items to Trash after confirmation. Rename and Trash update the scan; scan roots are protected
+- `⌘⌫`: move selected items to Trash after confirmation. Rename updates the scan; Trash marks successful moves in red without rebuilding the view. Click Update to recalculate totals. Scan roots are protected
 - Click a breadcrumb: navigate back up
 - **Back** (`⌘[`) and **Forward** (`⌘]`): revisit directories within the current report
 - **Up** (`⌘↑`): open the enclosing directory, stopping at the scan root
@@ -114,3 +114,7 @@ This prevents scan-triggered dataless materialization through macOS File Provide
 it does not suppress independent provider syncing or promise zero provider/network
 activity. Excluding known cloud roots entirely would also hide locally downloaded
 files and their disk usage. A universal provider-root exclusion is not implemented.
+
+### Immediate Trash feedback
+
+Moving items to Trash preserves the current map, expanded folders, and scroll position. Successfully moved rows show red “Trashed” labels; the map adds red outlines, including virtual file regions inside grouped blocks. A hidden folder can mark its containing group. Failed items stay unchanged and completed moves remain marked after a partial failure. Marked items and descendants cannot be opened or modified again through the view. Totals remain the scan snapshot until **Update** is requested; a new scan clears the marks.

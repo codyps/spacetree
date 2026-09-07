@@ -395,7 +395,7 @@ struct TreemapScene: Sendable {
     }
     // A weighted binary partition provides stable per-file hit rectangles without
     // storing or drawing them. Each pointer lookup takes logarithmic time.
-    private func virtualHit(at point: CGPoint, range: Range<Int>, in bounds: CGRect) -> Hit {
+    private func virtualHit(at point: CGPoint, range: Range<Int>, in bounds: CGRect, index: Int? = nil) -> Hit {
         var lower = range.lowerBound, upper = range.upperBound
         var rect = bounds
         func prefix(_ index: Int) -> Double { index == range.lowerBound ? 0 : virtualWeights[index - 1] }
@@ -405,7 +405,7 @@ struct TreemapScene: Sendable {
             let fraction = total > 0 ? (prefix(middle) - prefix(lower)) / total : 0.5
             if rect.width >= rect.height {
                 let split = rect.minX + rect.width * fraction
-                if point.x < split {
+                if index.map({ $0 < middle }) ?? (point.x < split) {
                     rect.size.width = split - rect.minX
                     upper = middle
                 } else {
@@ -415,7 +415,7 @@ struct TreemapScene: Sendable {
                 }
             } else {
                 let split = rect.minY + rect.height * fraction
-                if point.y < split {
+                if index.map({ $0 < middle }) ?? (point.y < split) {
                     rect.size.height = split - rect.minY
                     upper = middle
                 } else {
@@ -428,6 +428,35 @@ struct TreemapScene: Sendable {
         let id = virtualNodes[lower]
         return Hit(entry: Entry(nodeID: id, allocatedBytes: tree.allocatedBytes(of: id),
                                 category: FilePalette.category(forExtension: tree.fileExtension(of: id))), rect: rect)
+    }
+
+    func deletionRects(for ids: Set<NodeID>) throws -> [CGRect] {
+        var result: [CGRect] = []
+        var hidden: [NodeID: Bool] = [:]
+        for id in ids {
+            try Task.checkCancellation()
+            if let rect = rect(for: id) { result.append(rect); continue }
+            var leaf = id
+            let isFolder = tree.kind(of: id) == .directory || tree.kind(of: id) == .syntheticRoot
+            while tree.kind(of: leaf) == .directory || tree.kind(of: leaf) == .syntheticRoot {
+                guard let child = tree.childIDs(of: leaf).first(where: { tree.fileCount(of: $0) > 0 }) else { break }
+                leaf = child
+            }
+            hidden[leaf] = isFolder
+        }
+        guard !hidden.isEmpty else { return result }
+        // One pass over compact IDs on a worker; never rebuild the layout or paths.
+        for tile in tiles {
+            guard let range = entries[tile.entryIndex].virtualRange else { continue }
+            for index in range {
+                if index.isMultiple(of: 1_024) { try Task.checkCancellation() }
+                if let isFolder = hidden.removeValue(forKey: virtualNodes[index]) {
+                    result.append(isFolder ? tile.rect : virtualHit(at: .zero, range: range, in: tile.rect, index: index).rect)
+                    if hidden.isEmpty { return result }
+                }
+            }
+        }
+        return result
     }
 
     func label(for entry: Entry) -> String {

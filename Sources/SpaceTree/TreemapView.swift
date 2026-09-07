@@ -26,6 +26,8 @@ struct TreemapView: View {
                     if let scene {
                         TreemapBaseLayer(scene: scene, bounds: bounds)
                             .equatable()
+                        TreemapDeletionOverlay(scene: scene, target: target)
+                            .allowsHitTesting(false)
                         TreemapHoverOverlay(hover: hover, selectedRect: selectedRect)
                             .allowsHitTesting(false)
                         TreemapInteractionView(scene: scene, target: target, onSelect: onSelect) { location in
@@ -63,7 +65,7 @@ struct TreemapView: View {
                     await prepareScene(in: bounds)
                 }
             }
-            TreemapHoverPath(hover: hover)
+            TreemapHoverPath(hover: hover, target: target)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Disk usage treemap. Grouped blocks show directory names; hover identifies individual files.")
@@ -172,9 +174,11 @@ private struct TreemapBaseLayer: View, Equatable {
 // the static map layer do not depend on hover details.
 private struct TreemapHoverPath: View {
     let hover: TreemapHoverState
+    let target: ScanTarget
 
     var body: some View {
-        Text(hover.details?.label ?? "Hover for details · click to reveal in the file tree")
+        Text((hover.details?.label ?? "Hover for details · click to reveal in the file tree")
+             + (hover.details.map { target.isTrashed($0.nodeID) } == true ? " · Trashed" : ""))
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)
@@ -201,5 +205,40 @@ private struct TreemapHoverOverlay: View {
             }
         }
         .transaction { $0.animation = nil }
+    }
+}
+
+private struct TreemapDeletionOverlay: View {
+    let scene: TreemapScene
+    let target: ScanTarget
+    @State private var rectangles: [CGRect] = []
+
+    private struct Request: Equatable {
+        let sceneID: UUID
+        let nodes: Set<NodeID>
+    }
+
+    private var markedNodes: Set<NodeID> {
+        scene.tree.generation == target.tree?.generation ? target.trashedNodeIDs : []
+    }
+
+    var body: some View {
+        Canvas { context, _ in
+            for rect in rectangles {
+                // Subpixel files still get a visible marker centered on their region.
+                let marker = CGRect(x: rect.midX - max(3, rect.width) / 2,
+                                    y: rect.midY - max(3, rect.height) / 2,
+                                    width: max(3, rect.width), height: max(3, rect.height))
+                context.stroke(Path(marker), with: .color(.red), lineWidth: 2)
+            }
+        }
+        .task(id: Request(sceneID: scene.id, nodes: markedNodes)) {
+            let ids = markedNodes
+            guard !ids.isEmpty else { rectangles = []; return }
+            let worker = Task.detached(priority: .userInitiated) { try scene.deletionRects(for: ids) }
+            await withTaskCancellationHandler {
+                if let updated = try? await worker.value, !Task.isCancelled { rectangles = updated }
+            } onCancel: { worker.cancel() }
+        }
     }
 }

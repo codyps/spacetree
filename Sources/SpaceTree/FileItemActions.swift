@@ -10,7 +10,7 @@ final class FileItemActions: NSObject, @preconcurrency QLPreviewPanelDataSource 
 
     func open(_ nodes: [NodeMetadata], target: ScanTarget) {
         for node in nodes {
-            guard target.tree?.contains(node.handle) == true else { continue }
+            guard target.tree?.contains(node.handle) == true, !target.isTrashed(node.handle.nodeID) else { continue }
             if node.isDirectory { target.open(node) }
             else if !NSWorkspace.shared.open(node.url) { NSSound.beep() }
         }
@@ -42,6 +42,7 @@ final class FileItemActions: NSObject, @preconcurrency QLPreviewPanelDataSource 
     }
 
     func menu(for nodes: [NodeMetadata], target: ScanTarget) -> NSMenu {
+        let nodes = nodes.filter { !target.isTrashed($0.handle.nodeID) }
         let menu = NSMenu()
         menu.autoenablesItems = false
         func add(_ title: String, _ action: @escaping () -> Void) {
@@ -71,7 +72,7 @@ final class FileItemActions: NSObject, @preconcurrency QLPreviewPanelDataSource 
     }
 
     private func canModify(_ node: NodeMetadata, target: ScanTarget) -> Bool {
-        guard let tree = target.tree, tree.contains(node.handle), target.state != .scanning else { return false }
+        guard let tree = target.tree, tree.contains(node.handle), target.state != .scanning, !target.isTrashed(node.handle.nodeID) else { return false }
         return node.kind != .syntheticRoot && node.handle.nodeID != tree.rootID
             && !target.roots.contains(where: { $0.url.standardizedFileURL == node.url.standardizedFileURL })
     }
@@ -102,7 +103,7 @@ final class FileItemActions: NSObject, @preconcurrency QLPreviewPanelDataSource 
         guard !nodes.isEmpty, nodes.allSatisfy({ canModify($0, target: target) }) else { NSSound.beep(); return }
         let alert = NSAlert()
         alert.messageText = "Move \(nodes.count == 1 ? "“\(nodes[0].name)”" : "\(nodes.count) items") to the Trash?"
-        alert.informativeText = "The scan will update after the items are moved."
+        alert.informativeText = "Moved items will be marked in red. Click Update to recalculate totals."
         alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -116,11 +117,21 @@ final class FileItemActions: NSObject, @preconcurrency QLPreviewPanelDataSource 
             }
             return true
         }
-        for node in topLevel {
-            do { try FileManager.default.trashItem(at: node.url, resultingItemURL: nil) }
-            catch { NSAlert(error: error).runModal(); break }
+        do {
+            try moveConfirmedItemsToTrash(topLevel, target: target) {
+                try FileManager.default.trashItem(at: $0, resultingItemURL: nil)
+            }
+        } catch { NSAlert(error: error).runModal() }
+    }
+
+    // Record each success immediately, even if a later item cannot be moved.
+    func moveConfirmedItemsToTrash(_ nodes: [NodeMetadata], target: ScanTarget,
+                                   move: (URL) throws -> Void) throws {
+        for node in nodes {
+            guard canModify(node, target: target) else { continue }
+            try move(node.url)
+            target.recordTrashed(node)
         }
-        target.rescan()
     }
 }
 

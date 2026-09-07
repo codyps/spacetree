@@ -163,3 +163,21 @@ import Testing
     #expect(scene.tiles.count + scene.folders.count <= TreemapScene.maximumRegions)
     #expect(scene.totalSize == 40_000)
 }
+
+@Test func deletedVirtualFilesGetTheirExactHitRectangleWithoutRebuilding() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    for index in 0..<100 {
+        _ = builder.addNode(parent: builder.rootID, name: "file-\(index)", kind: .file,
+                            allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
+    }
+    let tree = try builder.finalize()
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
+                                      in: CGRect(x: 0, y: 0, width: 10, height: 10))
+    let hit = try #require(scene.hit(at: CGPoint(x: 4.2, y: 3.7)))
+    #expect(scene.rect(for: hit.entry.nodeID) == nil)
+    let markers = try scene.deletionRects(for: [hit.entry.nodeID])
+    #expect(markers == [hit.rect])
+    #expect(try scene.deletionRects(for: []).isEmpty)
+    #expect(scene.representedFileCount == 100)
+    #expect(scene.totalSize == 100)
+}

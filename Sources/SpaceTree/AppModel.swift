@@ -36,6 +36,7 @@ final class ScanTarget: Identifiable {
     var tree: ScanTree? {
         didSet {
             guard tree?.generation != oldValue?.generation else { return }
+            trashedNodeIDs.removeAll()
             backHistory.removeAll()
             forwardHistory.removeAll()
             currentID = tree?.rootID
@@ -43,6 +44,28 @@ final class ScanTarget: Identifiable {
             searchText = ""
         }
     }
+    private(set) var trashedNodeIDs: Set<NodeID> = []
+
+    func isTrashed(_ id: NodeID) -> Bool {
+        guard !trashedNodeIDs.isEmpty, let tree else { return false }
+        var cursor: NodeID? = id
+        while let node = cursor {
+            if trashedNodeIDs.contains(node) { return true }
+            cursor = tree.parent(of: node)
+        }
+        return false
+    }
+
+    func recordTrashed(_ node: NodeMetadata) {
+        guard let tree, tree.contains(node.handle) else { return }
+        trashedNodeIDs.insert(node.handle.nodeID)
+        hasFilesystemChanges = true
+        requiresFullRescan = true
+        changedPaths.insert(node.url.deletingLastPathComponent().path)
+        changedPathCount = changedPaths.count
+        if let selectedID, isTrashed(selectedID) { self.selectedID = nil }
+    }
+
     var currentID: NodeID?
     private var backHistory: [NodeID] = []
     private var forwardHistory: [NodeID] = []
@@ -137,7 +160,7 @@ final class ScanTarget: Identifiable {
     }
 
     var selected: NodeMetadata? {
-        guard let tree, let selectedID else { return nil }
+        guard let tree, let selectedID, !isTrashed(selectedID) else { return nil }
         return tree.metadata(for: selectedID)
     }
 
@@ -261,7 +284,7 @@ final class ScanTarget: Identifiable {
     }
 
     func open(_ node: NodeMetadata) {
-        guard let tree, tree.contains(node.handle) else { return }
+        guard let tree, tree.contains(node.handle), !isTrashed(node.handle.nodeID) else { return }
         if node.isDirectory {
             guard currentID != node.handle.nodeID else { return }
             if let currentID { backHistory.append(currentID) }

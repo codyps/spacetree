@@ -45,6 +45,7 @@ final class MapInputView: NSView {
     }
     private func node(at event: NSEvent) -> NodeMetadata? {
         guard let scene, let hit = scene.hit(at: convert(event.locationInWindow, from: nil)) else { return nil }
+        guard target?.isTrashed(hit.entry.nodeID) != true else { return nil }
         return scene.tree.metadata(for: hit.entry.nodeID)
     }
     override func mouseMoved(with event: NSEvent) { onHover?(convert(event.locationInWindow, from: nil)) }
