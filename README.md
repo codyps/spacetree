@@ -73,13 +73,13 @@ Then quit and reopen SpaceTree before scanning again.
 
 SpaceTree uses the native mount table and I/O Registry directly; it does not invoke `diskutil`. Mounted APFS filesystems that share an `AppleAPFSContainer` UUID—such as the startup System, Data, VM, Preboot, Nix, and development volumes—are combined into one scan target. External APFS containers and non-APFS filesystems remain separate. Time Machine backup volumes, mounted snapshots, disk images, and developer simulator/low-level system mounts are excluded by default from the dashboard and "Scan All", but can be enabled on demand with the dashboard's **Time Machine**, **Disk images**, and **Developer/system** checkboxes.
 
-Container scans visit each constituent filesystem exactly once and stop at mount boundaries, preventing nested mounts from being counted twice.
+Container scans coalesce overlapping roots and track directory device/inode identities before scheduling enumeration. This prevents macOS firmlink aliases such as `/Users` and `/System/Volumes/Data/Users` from being traversed twice. Distinct mounted filesystems remain separate scan roots, and enumeration stops at device boundaries.
 
 ### Scan performance
 
 On supported macOS filesystems, SpaceTree retrieves names, types, file IDs, sizes, allocation sizes, and modification dates for many directory entries in each `getattrlistbulk` call. Up to eight directory reads run concurrently, while separate mounted filesystems in an APFS container scan in parallel. Filesystems that do not support bulk attributes automatically use descriptor-relative `readdir`/`fstatat` enumeration. Directory descriptors are opened with `O_NOFOLLOW`, and entry metadata is read with `AT_SYMLINK_NOFOLLOW`.
 
-Completed trees are stored as binary snapshots in the user's Application Support directory. SpaceTree monitors their roots with FSEvents. Clicking **Check** on an unchanged result returns immediately; when changes are reported, **Update** rescans and replaces only affected directory subtrees. Dropped events, root changes, very large change sets, or trees containing hard-link references conservatively trigger a full rescan.
+Completed trees are stored as binary snapshots in the user's Application Support directory. SpaceTree monitors their roots with FSEvents. Clicking **Check** on an unchanged result returns immediately; when changes are reported, **Update** rescans and replaces only affected directory subtrees. Dropped events, root changes, very large change sets, trees containing hard-link references, or scans with multiple roots or rooted at `/` conservatively trigger a full rescan. These refreshes need the complete directory identity set to keep aliases deduplicated.
 
 ## Verify
 

@@ -127,6 +127,17 @@ enum DiskScanner {
         progress: @escaping @Sendable (ScanProgress) async -> Void
     ) async throws -> ScanTree {
         guard !changedPaths.isEmpty else { return existingRoot }
+        // Multi-root and system-volume refreshes need the scan-wide identity set:
+        // independently replacing subtrees can reintroduce firmlink aliases.
+        if scanRoots.count > 1 || scanRoots.contains(where: { $0.url.standardizedFileURL.path == "/" }) {
+            return try await scan(
+                roots: scanRoots,
+                displayName: existingRoot.metadata(for: existingRoot.rootID).name,
+                identifier: existingRoot.displayURL.absoluteString,
+                statistics: statistics,
+                progress: progress
+            )
+        }
         let rootPaths = scanRoots.map { $0.url.standardizedFileURL.path }
         let candidates = changedPaths.compactMap { changedPath -> String? in
             let url = URL(fileURLWithPath: changedPath).standardizedFileURL
@@ -169,10 +180,25 @@ enum DiskScanner {
         let policyError = st_prepare_metadata_scan()
         guard policyError == 0 else { throw DiskScannerError.rootCannotBeRead(roots[0].url, policyError) }
 
-        let standardizedRoots = roots.map { ScanRoot(url: $0.url.standardizedFileURL, name: $0.name) }
-        let rootStats = try standardizedRoots.map { root in
-            (root, try rootMetadata(at: root.url))
+        // Prefer ancestors so overlapping roots (including the macOS Data mount)
+        // are reached once through the enclosing tree. Other devices remain roots.
+        let candidates = try roots.map { root in
+            let root = ScanRoot(url: root.url.standardizedFileURL, name: root.name)
+            return (root, try rootMetadata(at: root.url))
+        }.sorted { $0.0.url.path.count < $1.0.url.path.count }
+        var rootIdentities = Set<FileIdentity>()
+        var rootStats: [(ScanRoot, (device: UInt64, inode: UInt64))] = []
+        for (root, metadata) in candidates {
+            let identity = FileIdentity(device: metadata.device, inode: metadata.inode)
+            guard !rootIdentities.contains(identity) else { continue }
+            guard !rootStats.contains(where: { parent, parentMetadata in
+                let prefix = parent.url.path == "/" ? "/" : parent.url.path + "/"
+                return parentMetadata.device == metadata.device && root.url.path.hasPrefix(prefix)
+            }) else { continue }
+            rootIdentities.insert(identity)
+            rootStats.append((root, metadata))
         }
+        let standardizedRoots = rootStats.map { $0.0 }
         let safeIdentifier = identifier.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? UUID().uuidString
         let displayURL = standardizedRoots.count == 1
             ? standardizedRoots[0].url
@@ -196,6 +222,9 @@ enum DiskScanner {
 
             statistics?.beginPhase("Enumerating directories")
             var seenIdentities = Set<FileIdentity>()
+            // Claim identities before scheduling work, on this single coordinator.
+            // Firmlinks are directories, not symlinks, and must not be walked twice.
+            var seenDirectories = rootIdentities
             var state = ScanProgress(
                 currentPath: standardizedRoots[0].url.path,
                 itemCount: pending.count,
@@ -232,7 +261,11 @@ enum DiskScanner {
                         state.unreadableCount += 1
                     }
 
+                    var addedCount = 0
                     for entry in batch.entries {
+                        if entry.kind == .directory, let identity = entry.identity,
+                           !seenDirectories.insert(identity).inserted { continue }
+                        addedCount += 1
                         guard builder.nodes.count < Int(UInt32.max) else { throw DiskScannerError.tooManyEntries }
                         let nodeID = builder.addNode(
                             parent: batch.work.nodeID,
@@ -241,7 +274,7 @@ enum DiskScanner {
                             allocatedBytes: entry.kind == .symlink ? 0 : entry.size,
                             logicalBytes: entry.kind == .symlink ? 0 : entry.logicalSize,
                             modifiedAt: entry.modifiedAt,
-                            identity: entry.identity
+                            identity: entry.kind == .file ? entry.identity : nil
                         )
                         if entry.kind == .directory {
                             pending.append(DirectoryWork(
@@ -257,7 +290,7 @@ enum DiskScanner {
                             }
                         }
                     }
-                    state.itemCount += batch.entries.count
+                    state.itemCount += addedCount
                     state.currentPath = batch.work.url.path
 
                     let now = ContinuousClock.now
@@ -320,7 +353,7 @@ enum DiskScanner {
                 size: max(0, record.allocated_size),
                 logicalSize: max(0, record.logical_size),
                 modifiedAt: modifiedAt,
-                identity: kind == .file && record.file_id != 0 && record.link_count > 1
+                identity: record.file_id != 0 && (kind == .directory || (kind == .file && record.link_count > 1))
                     ? FileIdentity(device: record.device_id, inode: record.file_id)
                     : nil
             ))

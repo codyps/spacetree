@@ -310,6 +310,26 @@ struct ScanTree: Codable, Equatable, Sendable {
         return result.reversed()
     }
 
+    // Display-only path construction uses the scanned names directly. Avoid
+    // constructing a Foundation URL for every ancestor during pointer movement.
+    func displayPath(of nodeID: NodeID) -> String {
+        if nodeID == rootID, roots.allSatisfy({ $0.nodeID != rootID }) {
+            return displayURL.path
+        }
+        var components: [String] = []
+        var current = nodeID
+        while true {
+            if let root = roots.first(where: { $0.nodeID == current }) {
+                let prefix = root.url.path
+                guard !components.isEmpty else { return prefix }
+                return prefix + (prefix.hasSuffix("/") ? "" : "/") + components.reversed().joined(separator: "/")
+            }
+            components.append(name(of: current))
+            guard let parent = parent(of: current) else { return displayURL.path }
+            current = parent
+        }
+    }
+
     func url(of nodeID: NodeID) -> URL {
         if nodeID == rootID, roots.allSatisfy({ $0.nodeID != rootID }) {
             return displayURL

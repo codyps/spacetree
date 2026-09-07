@@ -209,8 +209,12 @@ private struct ScanTargetCard: View {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("\(target.progress.itemCount.formatted()) items")
+                        .monospacedDigit()
+                        .frame(width: 130, alignment: .trailing)
                     Text("·")
                     Text(target.progress.bytesFound.formattedByteCount)
+                        .monospacedDigit()
+                        .frame(width: 80, alignment: .trailing)
                     Button("Stop", role: .cancel, action: target.cancel)
                 }
                 // Both scan phases occupy the same single-line status slot.

@@ -98,6 +98,7 @@ enum TreemapLayout {
 }
 
 struct TreemapScene: Sendable {
+    let id = UUID()
     struct Entry: Identifiable, Sendable {
         let nodeID: NodeID
         let allocatedBytes: Int64
@@ -125,6 +126,7 @@ struct TreemapScene: Sendable {
     let folders: [Folder]
     let labeledFolders: [Folder]
     let regionRects: [NodeID: CGRect]
+    let raster: CGImage?
     let lightEdges: Path
     let darkEdges: Path
     let tree: ScanTree
@@ -135,7 +137,7 @@ struct TreemapScene: Sendable {
     let totalSize: Int64
     private let hitIndex: TreemapHitIndex
 
-    static func build(tree: ScanTree, nodes: [NodeID], in bounds: CGRect) -> TreemapScene {
+    static func build(tree: ScanTree, nodes: [NodeID], in bounds: CGRect, displayScale: CGFloat = 1) -> TreemapScene {
         var folders: [Folder] = []
         var regionRects: [NodeID: CGRect] = [:]
         var entries: [Entry] = []
@@ -171,10 +173,11 @@ struct TreemapScene: Sendable {
             tiles.append(Tile(entryIndex: entryIndex, rect: region.rect))
         }
 
-        var fillPaths = FileCategory.allCases.map { _ in Path() }
+        var fillRects = FileCategory.allCases.map { _ in [CGRect]() }
+        let fillPaths = FileCategory.allCases.map { _ in CGMutablePath() }
         var labeledTileIndices: [Int] = []
-        var lightEdges = Path()
-        var darkEdges = Path()
+        let lightEdges = CGMutablePath()
+        let darkEdges = CGMutablePath()
         for (tileIndex, tile) in tiles.enumerated() {
             let rect = tile.rect
             if rect.width >= 3 && rect.height >= 3 {
@@ -185,6 +188,7 @@ struct TreemapScene: Sendable {
                 darkEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.maxY - 0.5))
                 darkEdges.addLine(to: CGPoint(x: rect.maxX - 0.5, y: rect.minY + 0.5))
             }
+            fillRects[Int(entries[tile.entryIndex].category.rawValue)].append(rect)
             fillPaths[Int(entries[tile.entryIndex].category.rawValue)].addRect(rect)
             if rect.width >= 78, rect.height >= 34 {
                 labeledTileIndices.append(tileIndex)
@@ -194,16 +198,53 @@ struct TreemapScene: Sendable {
             folders: folders,
             labeledFolders: folders.filter { $0.header != nil },
             regionRects: regionRects,
-            lightEdges: lightEdges,
-            darkEdges: darkEdges,
+            raster: rasterize(rects: fillRects, lightEdges: Path(lightEdges), darkEdges: Path(darkEdges), in: bounds, scale: displayScale),
+            lightEdges: Path(lightEdges),
+            darkEdges: Path(darkEdges),
             tree: tree,
             entries: entries,
             tiles: tiles,
-            fillPaths: fillPaths,
+            fillPaths: fillPaths.map { Path($0) },
             labeledTileIndices: labeledTileIndices,
             totalSize: entries.reduce(0) { saturatingSceneAdd($0, $1.allocatedBytes) },
             hitIndex: TreemapHitIndex(tiles: tiles, bounds: bounds)
         )
+    }
+
+    // Fill independent rectangles directly instead of asking the rasterizer to
+    // resolve a compound path with potentially millions of contours. Run once
+    // on the scene-building worker; the UI only composites the resulting image.
+    private static func rasterize(rects: [[CGRect]], lightEdges: Path, darkEdges: Path,
+                                  in bounds: CGRect, scale: CGFloat) -> CGImage? {
+        guard bounds.width > 0, bounds.height > 0, scale.isFinite, scale > 0 else { return nil }
+        let width = ceil(bounds.width * scale)
+        let height = ceil(bounds.height * scale)
+        // Bound the optional cache to 64 megapixels; vector drawing is the fallback.
+        guard width.isFinite, height.isFinite, width * height <= 64_000_000,
+              let context = CGContext(data: nil, width: Int(width), height: Int(height),
+                                      bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.translateBy(x: 0, y: height)
+        context.scaleBy(x: scale, y: -scale)
+        context.translateBy(x: -bounds.minX, y: -bounds.minY)
+        context.setShouldAntialias(false)
+        for category in FileCategory.allCases {
+            guard let color = FilePalette.color(for: category).cgColor else { return nil }
+            context.setFillColor(color)
+            // The array overload benchmarks poorly on dense squarified
+            // layouts. Filling rectangles individually keeps this fast.
+            for rect in rects[Int(category.rawValue)] { context.fill(rect) }
+        }
+        context.setShouldAntialias(true)
+        context.setLineWidth(1)
+        context.setStrokeColor(CGColor(gray: 1, alpha: 0.30))
+        context.addPath(lightEdges.cgPath)
+        context.strokePath()
+        context.setStrokeColor(CGColor(gray: 0, alpha: 0.18))
+        context.addPath(darkEdges.cgPath)
+        context.strokePath()
+        return context.makeImage()
     }
 
     private struct NodeRegion {
