@@ -53,9 +53,31 @@ import Testing
     var usage = rusage()
     getrusage(RUSAGE_SELF, &usage)
     print("Saved snapshot ready: nodes=\(tree.nodeCount) storageMiB=\(Double(tree.estimatedStorageBytes) / 1_048_576) peakRSSMiB=\(Double(usage.ru_maxrss) / 1_048_576)")
+    let runs = max(1, Int(ProcessInfo.processInfo.environment["SPACETREE_LAYOUT_RUNS"] ?? "7") ?? 7)
+    var scene: TreemapScene!
+    var timings: [[Double]] = []
+    func milliseconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) * 1_000 + Double(duration.components.attoseconds) / 1e15
+    }
     let start = ContinuousClock.now
-    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
-                                      in: CGRect(x: 0, y: 0, width: 1200, height: 800), displayScale: 2)
+    for run in 0..<runs {
+        scene = nil // Do not retain the previous bitmap/index during the next build.
+        var stageStart = ContinuousClock.now
+        var stages: [Double] = []
+        scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
+                                      in: CGRect(x: 0, y: 0, width: 1200, height: 800), displayScale: 2) { progress in
+            if progress.stage == "Rendering tree…" || progress.stage == "Finishing tree…" {
+                let now = ContinuousClock.now
+                stages.append(milliseconds(stageStart.duration(to: now)))
+                stageStart = now
+            }
+        }
+        stages.append(milliseconds(stageStart.duration(to: .now)))
+        timings.append(stages)
+        print("Grid profile run \(run): layout/index=\(stages[0])ms raster=\(stages[1])ms finishing=\(stages[2])ms")
+    }
+    let medians = (0..<3).map { stage in timings.map { $0[stage] }.sorted()[runs / 2] }
+    print("Grid profile median (\(runs) runs): layout/index=\(medians[0])ms raster=\(medians[1])ms finishing=\(medians[2])ms")
     getrusage(RUSAGE_SELF, &usage)
     print("Saved snapshot scene: elapsed=\(start.duration(to: .now)) regions=\(scene.tiles.count + scene.folders.count) representedFiles=\(scene.representedFileCount) peakRSSMiB=\(Double(usage.ru_maxrss) / 1_048_576)")
     if let tile = scene.tiles.last(where: { scene.entries[$0.entryIndex].virtualRange != nil }),

@@ -79,3 +79,41 @@ import Testing
     #expect(updates.suffix(2).map(\.stage) == ["Rendering tree…", "Finishing tree…"])
     #expect(updates.suffix(2).allSatisfy { $0.fraction == nil })
 }
+
+@Test func gridSiblingTraversalIsRestartableAndIteratorsAreIndependent() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    let empty = builder.addNode(parent: builder.rootID, name: "empty", kind: .directory,
+                                allocatedBytes: 0, logicalBytes: 0, modifiedAt: nil, identity: nil)
+    for index in 0..<100 {
+        _ = builder.addNode(parent: builder.rootID, name: "file-\(index)", kind: .file,
+                            allocatedBytes: Int64(index), logicalBytes: Int64(index), modifiedAt: nil, identity: nil)
+    }
+    let tree = try builder.finalize()
+    let children = tree.childIDs(of: tree.rootID)
+    let expected = tree.children(of: tree.rootID)
+    #expect(Array(children) == expected)
+    #expect(Array(children) == expected)
+    var first = children.makeIterator()
+    var second = children.makeIterator()
+    #expect(first.next() == expected[0])
+    #expect(first.next() == expected[1])
+    #expect(second.next() == expected[0])
+    #expect(Array(tree.childIDs(of: empty)).isEmpty)
+}
+
+@Test func gridOnlyDebouncesSizeChangesWithinTheSameContent() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    let tree = try builder.finalize()
+    func request(_ size: CGFloat = 800, nodes: [NodeID] = [], scale: CGFloat = 2) -> LayoutRequest {
+        LayoutRequest(tree: tree, nodeIDs: nodes, size: CGSize(width: size, height: 600), displayScale: scale)
+    }
+    let original = request()
+    #expect(!original.isResize(of: nil))
+    #expect(!original.isResize(of: original))
+    #expect(request(900).isResize(of: original))
+    #expect(!request(900, nodes: [tree.rootID]).isResize(of: original))
+    #expect(!request(900, scale: 1).isResize(of: original))
+    let otherTree = try builder.finalize()
+    let replacement = LayoutRequest(tree: otherTree, nodeIDs: [], size: CGSize(width: 900, height: 600), displayScale: 2)
+    #expect(!replacement.isResize(of: original))
+}

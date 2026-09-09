@@ -297,13 +297,26 @@ struct ScanTree: Codable, Equatable, Sendable {
     }
 
     // Restartable sibling traversal without allocating an array for huge folders.
-    func childIDs(of nodeID: NodeID) -> AnySequence<NodeID> {
-        AnySequence {
-            var child = nodes[index(of: nodeID)].firstChild
-            return AnyIterator<NodeID> {
-                guard child != .null else { return nil }
-                let result = child
-                child = nodes[index(of: child)].nextSibling
+    func childIDs(of nodeID: NodeID) -> ChildSequence {
+        ChildSequence(nodes: nodes, firstChild: nodes[index(of: nodeID)].firstChild)
+    }
+
+    // A concrete iterator avoids allocating closure/AnyIterator boxes for every
+    // directory visited while preparing the grid's per-file hover index.
+    struct ChildSequence: Sequence {
+        fileprivate let nodes: [NodeRecord]
+        fileprivate let firstChild: NodeID
+
+        func makeIterator() -> Iterator { Iterator(nodes: nodes, nextChild: firstChild) }
+
+        struct Iterator: IteratorProtocol {
+            fileprivate let nodes: [NodeRecord]
+            fileprivate var nextChild: NodeID
+
+            mutating func next() -> NodeID? {
+                guard nextChild != .null else { return nil }
+                let result = nextChild
+                nextChild = nodes[Int(result.rawValue)].nextSibling
                 return result
             }
         }

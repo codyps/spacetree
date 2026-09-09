@@ -14,6 +14,7 @@ struct TreemapView: View {
     @State private var isPreparing = false
     @State private var activeRequest = UUID()
     @State private var buildOwner = UUID()
+    @State private var previousLayoutRequest: LayoutRequest?
     @State private var buildProgress = TreemapScene.BuildProgress(stage: "Laying out tree…")
 
     var body: some View {
@@ -74,6 +75,9 @@ struct TreemapView: View {
     @MainActor
     private func prepareScene(in bounds: CGRect) async {
         guard bounds.width > 0, bounds.height > 0, !Task.isCancelled else { return }
+        let layoutRequest = LayoutRequest(tree: tree, nodeIDs: nodeIDs, size: bounds.size, displayScale: displayScale)
+        let coalesceResize = layoutRequest.isResize(of: previousLayoutRequest)
+        previousLayoutRequest = layoutRequest
         let requestID = UUID()
         activeRequest = requestID
         buildProgress = TreemapScene.BuildProgress(stage: "Laying out tree…", total: 0)
@@ -84,8 +88,8 @@ struct TreemapView: View {
         let (updates, continuation) = AsyncStream<TreemapScene.BuildProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let request = Task {
             defer { continuation.finish() }
-            // Coalesce live resize changes before allocating a new scene.
-            try await Task.sleep(for: .milliseconds(120))
+            // Coalesce live resizes, but start initial display and navigation immediately.
+            if coalesceResize { try await Task.sleep(for: .milliseconds(120)) }
             return try await TreemapBuildCoordinator.shared.build(owner: buildOwner, tree: inputTree, nodes: inputNodes, bounds: bounds, scale: scale) {
                 continuation.yield($0)
             }
@@ -112,12 +116,19 @@ struct TreemapView: View {
     }
 }
 
-private struct LayoutRequest: Equatable {
+struct LayoutRequest: Equatable {
     let generation: TreeGeneration
     let width: Int
     let height: Int
     let nodeIDs: [NodeID]
     let displayScale: CGFloat
+
+    func isResize(of previous: Self?) -> Bool {
+        guard let previous else { return false }
+        return generation == previous.generation && nodeIDs == previous.nodeIDs
+            && displayScale == previous.displayScale
+            && (width != previous.width || height != previous.height)
+    }
 
     init(tree: ScanTree, nodeIDs: [NodeID], size: CGSize, displayScale: CGFloat) {
         self.displayScale = displayScale
