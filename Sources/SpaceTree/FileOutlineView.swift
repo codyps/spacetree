@@ -158,7 +158,7 @@ struct FileOutlineView: NSViewRepresentable {
                     meter.doubleValue = fraction
                     meter.fillColor = NSColor(FilePalette.color(for: node))
                 }
-            case "type": text = node.isDuplicateReference ? "Hard link" : node.fileExtension.capitalized
+            case "type": text = [node.isDuplicateReference ? "Hard link" : node.fileExtension.capitalized, node.clone?.label].compactMap { $0 }.joined(separator: " · ")
             case "items": text = node.isDirectory ? node.fileCount.formatted() : "—"
             case "size": text = node.allocatedBytes.formattedByteCount
             default: text = node.modifiedAt?.formatted(date: .abbreviated, time: .omitted) ?? "—"
@@ -166,7 +166,7 @@ struct FileOutlineView: NSViewRepresentable {
             let trashed = target.isTrashed(item.id)
             cell.textField?.stringValue = text + (trashed && identifier.rawValue == "name" ? " — Trashed" : "")
             cell.textField?.textColor = trashed ? .systemRed : .labelColor
-            cell.toolTip = node.url.path
+            cell.toolTip = node.url.path + (node.clone.map { "\n\($0.label). Allocated size may include shared blocks." } ?? "")
             return cell
         }
         private func makeCell(_ identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {

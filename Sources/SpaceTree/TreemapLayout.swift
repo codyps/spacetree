@@ -253,6 +253,17 @@ struct TreemapScene: Sendable {
             if index.isMultiple(of: 256) { try Task.checkCancellation() }
             context.setFillColor(colors[Int(entries[tile.entryIndex].category.rawValue)])
             context.fill(tile.rect)
+            if entries[tile.entryIndex].isAggregate {
+                context.saveGState()
+                context.clip(to: tile.rect)
+                context.setFillColor(CGColor(gray: 0, alpha: 0.18))
+                context.fill(tile.rect)
+                context.setStrokeColor(CGColor(gray: 1, alpha: 0.25))
+                context.setLineWidth(1)
+                context.addPath(aggregateHatching(in: tile.rect))
+                context.strokePath()
+                context.restoreGState()
+            }
         }
         context.setShouldAntialias(true)
         context.setLineWidth(1)
@@ -272,6 +283,18 @@ struct TreemapScene: Sendable {
         }
         try Task.checkCancellation()
         return context.makeImage()
+    }
+
+    // Shared geometry keeps the raster and Canvas fallback visually identical.
+    static func aggregateHatching(in rect: CGRect) -> CGPath {
+        let path = CGMutablePath()
+        var x = rect.minX - rect.height
+        while x < rect.maxX {
+            path.move(to: CGPoint(x: x, y: rect.maxY))
+            path.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+            x += 7
+        }
+        return path
     }
 
     private struct NodeRegion {
@@ -336,42 +359,30 @@ struct TreemapScene: Sendable {
                 smallWeight += value
             }
         }
-        // Split the hidden tail into small blocks instead of one enormous slab.
-        let slots = max(1, limit - items.count)
-        let groupWeight = max(total * 4_096 / max(1, bounds.width * bounds.height), smallWeight / Double(slots))
-        var group: [NodeID] = []
-        var groupSum = 0.0
-        var groupBytes: Int64 = 0
-        var groupFiles = 0
-        var groups = 0
-        func flush() {
-            guard !group.isEmpty else { return }
+        // One tail region per folder. Its combined area never promotes it ahead
+        // of individually visible children in the descending display order.
+        if !small.isEmpty {
+            var bytes: Int64 = 0
+            var files = 0
+            for (index, id) in small.enumerated() {
+                if index.isMultiple(of: 1_024) { try Task.checkCancellation() }
+                bytes = saturatingSceneAdd(bytes, tree.allocatedBytes(of: id))
+                files += tree.fileCount(of: id)
+            }
             let destination: NodeID
-            if group.count == 1, let id = group.first,
+            if small.count == 1, let id = small.first,
                tree.kind(of: id) == .directory || tree.kind(of: id) == .syntheticRoot {
                 destination = id
             } else { destination = owner }
-            items.append(WeightedEntry(entry: Entry(nodeID: destination, allocatedBytes: groupBytes, category: .other,
-                                                     representedFileCount: groupFiles, isAggregate: true),
-                                       weight: groupSum, members: group))
-            group = []
-            groupSum = 0
-            groupBytes = 0
-            groupFiles = 0
-            groups += 1
+            items.append(WeightedEntry(entry: Entry(nodeID: destination, allocatedBytes: bytes, category: .other,
+                                                     representedFileCount: files, isAggregate: true),
+                                       weight: smallWeight, members: small))
         }
-        for (index, id) in small.enumerated() {
-            if index.isMultiple(of: 1_024) { try Task.checkCancellation() }
-            let value = weight(id)
-            if !group.isEmpty, groupSum + value > groupWeight, groups < slots - 1 { flush() }
-            group.append(id)
-            groupSum += value
-            groupBytes = saturatingSceneAdd(groupBytes, tree.allocatedBytes(of: id))
-            groupFiles += tree.fileCount(of: id)
-        }
-        flush()
         try Task.checkCancellation()
-        items.sort { $0.weight == $1.weight ? $0.entry.nodeID < $1.entry.nodeID : $0.weight > $1.weight }
+        items.sort {
+            if $0.entry.isAggregate != $1.entry.isAggregate { return !$0.entry.isAggregate }
+            return $0.weight == $1.weight ? $0.entry.nodeID < $1.entry.nodeID : $0.weight > $1.weight
+        }
         let rectangles = TreemapLayout.rectangles(for: items, in: bounds, weight: \.weight)
         try Task.checkCancellation()
         let spare = max(0, limit - items.count)

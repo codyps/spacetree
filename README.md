@@ -118,3 +118,16 @@ files and their disk usage. A universal provider-root exclusion is not implement
 ### Immediate Trash feedback
 
 Moving items to Trash preserves the current map, expanded folders, and scroll position. Successfully moved rows show red “Trashed” labels; the map adds red outlines, including virtual file regions inside grouped blocks. A hidden folder can mark its containing group. Failed items stay unchanged and completed moves remain marked after a partial failure. Marked items and descendants cannot be opened or modified again through the view. Totals remain the scan snapshot until **Update** is requested; a new scan clears the marks.
+
+### APFS clone metadata
+
+Fresh scans annotate full APFS clones and files that may share blocks in the
+outline Type column and treemap hover text. A full clone's context menu can
+reveal other observed full clones in Finder. Clone metadata is saved with the
+scan; older snapshots get a full metadata refresh on Check/Update before these annotations are available.
+Allocated sizes remain per-file values, not an estimate of reclaimable space.
+
+Bulk filesystem reads now distinguish directory records from file records.
+Saved scan statistics include `filesystemReads` counters for bulk calls/entries,
+fallback directories, extended-attribute retries, and errors. See
+[the APFS detection notes](docs/apfs-clone-detection.md) for limitations and tests.

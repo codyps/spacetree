@@ -2,13 +2,16 @@
 
 Verified 2026-09-07 on macOS 26 / Darwin 25.6.0, using generated fixtures on
 both the system Data volume (`/tmp`) and the APFS volume containing this repo.
-This is an investigation; the scanner does not yet collect clone metadata.
+The scanner now collects clone candidates in its bulk read, stores them in a
+sparse per-tree side table, and displays sharing annotations. Allocated totals
+are unchanged; no physical extent walk is performed. Snapshot version 4 persists
+the side table and still loads versions 2 and 3 (with unknown clone state).
 
 ## What we can detect cheaply
 
 APFS clones have separate inodes but initially share file data copy-on-write.
-The scanner currently records device/inode identities for hard links and uses
-allocated sizes for ordinary files. That cannot identify clones: each clone
+The scanner previously recorded device/inode identities for hard links and used
+allocated sizes for ordinary files. Those fields alone cannot identify clones: each clone
 can report the full allocated size despite sharing storage.
 
 Request these attributes in the existing `getattrlistbulk` call:
@@ -73,7 +76,16 @@ The implications are:
 - These attributes describe current sharing, not historical copy provenance.
   They cannot say which pathname was the source of a clone operation.
 
-## Recommended integration
+## Implemented integration
+
+The following design is implemented for candidate annotations, snapshot storage,
+and on-demand discovery of full-clone peers. Capability probing remains a future
+optimization; detection currently requires returned clone ID/flags and positive
+sharing flags. Unsupported extended queries retry ordinary bulk enumeration,
+then fall back to metadata stat calls if necessary. No annotation means unknown
+or no reported sharing, not a guarantee of exclusive storage.
+
+## Design considerations
 
 1. Extend `st_directory_entry_t` and the bulk parser with clone ID, 64-bit
    flags, refcount, and explicit validity information. Attribute records use
@@ -128,6 +140,39 @@ the scanner's combined file mask `0x7`, and that mask plus clone metadata
 succeeded. No replacement of the existing size/link-count attributes is
 justified by the current evidence. Earlier disk-image results have not been
 revalidated and should not be used to infer support on other volumes.
+
+## Bulk-path regression found during implementation
+
+A successful `getattrlistbulk` syscall did not prove that SpaceTree consumed its
+records. The previous parser assumed file attributes were present in directory
+records too. Even with `FSOPT_PACK_INVAL_ATTRS`, directories omit those fields.
+A short directory record therefore failed the fixed-size check with `EIO`,
+causing the entire directory to be enumerated again with `readdir`/`fstatat`.
+
+An instrumented build of commit `00c82cf` reproduced this fallback in all six
+checked directories: `/`, `/Applications`, `/System/Library`, the user home,
+the repo root, and `/Volumes/dev/p`. With the corrected variable-layout parser,
+all six used bulk enumeration with zero fallback/retry/error counters.
+
+`ScanStatistics.filesystemReads` now records bulk calls, entries returned by
+bulk syscalls (including discarded/retried batches), fallback directories,
+extended-query retries, and bulk errors. This makes future fallback behavior
+observable in the saved scan statistics rather than inferred from scan success.
+
+Validation includes live clone/modified-clone/hard-link fixtures, directory and
+symlink records, 2,500 long-name entries spanning multiple batches, snapshot
+round trips, and a standalone native fault-injection test. Run that test with:
+
+```sh
+xcrun clang -Wall -Wextra -Werror -I Sources/SpaceTreeNative/include Tests/Native/BulkFallbackTests.c -o /tmp/spacetree-bulk-tests
+/tmp/spacetree-bulk-tests
+```
+
+A release scan of `/Volumes/dev/p` found 447,189 nodes and 8,140 clone
+candidates in 2.456 seconds. It issued 94,511 bulk calls returning 447,188
+entries, with zero fallback directories, clone-query retries, or bulk errors.
+This is a host/dataset-specific observation, not a cold-cache benchmark or a
+measurement of the complete Macintosh HD scan.
 
 ## Primary references
 

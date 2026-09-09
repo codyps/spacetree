@@ -54,6 +54,15 @@ final class FileItemActions: NSObject, @preconcurrency QLPreviewPanelDataSource 
         add("Reveal in Finder") {
             NSWorkspace.shared.activateFileViewerSelecting(nodes.filter { $0.kind != .syntheticRoot }.map(\.url))
         }
+        if nodes.count == 1, let node = nodes.first, node.clone?.sharesAllBlocks == true,
+           let tree = target.tree, tree.contains(node.handle) {
+            let peers = tree.clonePeers(of: node.handle.nodeID).filter { !target.isTrashed($0) }
+            if !peers.isEmpty {
+                add("Reveal Other Full Clones in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting(peers.map { tree.url(of: $0) })
+                }
+            }
+        }
         add("Quick Look") { self.preview(nodes) }
         menu.addItem(.separator())
         add("Copy") { self.copy(nodes) }

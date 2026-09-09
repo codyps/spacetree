@@ -146,6 +146,13 @@ private struct TreemapBaseLayer: View, Equatable {
                 // The fallback is bounded by the same visible-region budget.
                 for tile in scene.tiles {
                     context.fill(Path(tile.rect), with: .color(FilePalette.color(for: scene.entries[tile.entryIndex].category)))
+                    if scene.entries[tile.entryIndex].isAggregate {
+                        var grouped = context
+                        grouped.clip(to: Path(tile.rect))
+                        grouped.fill(Path(tile.rect), with: .color(.black.opacity(0.18)))
+                        grouped.stroke(Path(TreemapScene.aggregateHatching(in: tile.rect)),
+                                       with: .color(.white.opacity(0.25)), lineWidth: 1)
+                    }
                 }
             }
             for folder in scene.labeledFolders {
@@ -177,8 +184,11 @@ private struct TreemapHoverPath: View {
     let target: ScanTarget
 
     var body: some View {
-        Text((hover.details?.label ?? "Hover for details · click to reveal in the file tree")
-             + (hover.details.map { target.isTrashed($0.nodeID) } == true ? " · Trashed" : ""))
+        let label = hover.details?.label ?? "Hover for details · click to reveal in the file tree"
+        let cloneLabel = hover.details.flatMap { target.tree?.clones[$0.nodeID]?.label }
+        let sharing = cloneLabel.map { " · " + $0 } ?? ""
+        let trashed = hover.details.map { target.isTrashed($0.nodeID) } == true ? " · Trashed" : ""
+        Text(label + sharing + trashed)
             .font(.caption)
             .foregroundStyle(.secondary)
             .lineLimit(1)

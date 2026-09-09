@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 
 struct ScanSnapshot: Sendable {
-    static let currentVersion = 3
+    static let currentVersion = 4
 
     let version: Int
     let targetID: String
@@ -12,6 +12,7 @@ struct ScanSnapshot: Sendable {
     let scanDuration: TimeInterval
     let fseventID: UInt64
     var statistics: ScanStatistics? = nil
+    var requiresMetadataRefresh = false
 }
 
 enum SnapshotFormatError: Error {
@@ -109,6 +110,18 @@ enum SnapshotStore {
         }
         for member in tree.hardLinkMembers { writer.append(member.rawValue) }
 
+        try writer.append(count: tree.clones.count)
+        for id in tree.clones.keys.sorted() {
+            let clone = tree.clones[id]!
+            writer.append(id.rawValue)
+            writer.append(clone.deviceID)
+            writer.append(clone.fileID)
+            writer.append(clone.cloneID)
+            writer.append(clone.flags)
+            writer.append(clone.referenceCount ?? 0)
+            writer.append(UInt32(clone.referenceCount == nil ? 0 : 1))
+        }
+
         let statisticsData = try JSONEncoder().encode(snapshot.statistics)
         try writer.append(count: statisticsData.count)
         writer.append(bytes: Array(statisticsData))
@@ -127,7 +140,7 @@ enum SnapshotStore {
         var reader = BinaryReader(data: Data(payload))
         guard try reader.readBytes(count: signature.count) == signature else { throw SnapshotFormatError.invalidSignature }
         let version = Int(try reader.readUInt32())
-        guard version == 2 || version == ScanSnapshot.currentVersion else { throw SnapshotFormatError.unsupportedVersion }
+        guard (2...ScanSnapshot.currentVersion).contains(version) else { throw SnapshotFormatError.unsupportedVersion }
         let targetID = try reader.readString()
         let scannedAt = Date(timeIntervalSince1970: Double(bitPattern: try reader.readUInt64()))
         let duration = Double(bitPattern: try reader.readUInt64())
@@ -214,6 +227,24 @@ enum SnapshotStore {
         var members: [NodeID] = []
         members.reserveCapacity(memberCount)
         for _ in 0..<memberCount { members.append(NodeID(rawValue: try reader.readUInt32())) }
+        var clones: [NodeID: CloneMetadata] = [:]
+        if version >= 4 {
+            let count = try reader.readCount(maximum: nodeCount)
+            guard try checkedByteCount(count, 44) <= reader.remainingCount else { throw SnapshotFormatError.truncated }
+            clones.reserveCapacity(count)
+            for _ in 0..<count {
+                let id = NodeID(rawValue: try reader.readUInt32())
+                let device = try reader.readUInt64()
+                let file = try reader.readUInt64()
+                let clone = try reader.readUInt64()
+                let flags = try reader.readUInt64()
+                let refs = try reader.readUInt32()
+                let valid = try reader.readUInt32()
+                guard valid <= 1, clones[id] == nil else { throw SnapshotFormatError.invalidValue }
+                clones[id] = CloneMetadata(deviceID: device, fileID: file, cloneID: clone,
+                                           flags: flags, referenceCount: valid == 1 ? refs : nil)
+            }
+        }
         var statistics: ScanStatistics?
         if version >= 3 {
             let count = try reader.readCount(maximum: 1_048_576)
@@ -230,7 +261,8 @@ enum SnapshotStore {
             roots: roots,
             hardLinkGroups: groups,
             hardLinkMembers: members,
-            unreadableCount: unreadableCount
+            unreadableCount: unreadableCount,
+            clones: clones
         )
         try tree.validate()
         return ScanSnapshot(
@@ -241,7 +273,8 @@ enum SnapshotStore {
             scannedAt: scannedAt,
             scanDuration: duration,
             fseventID: eventID,
-            statistics: statistics
+            statistics: statistics,
+            requiresMetadataRefresh: version < 4
         )
     }
 

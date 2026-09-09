@@ -111,6 +111,19 @@ struct HardLinkGroup: Codable, Equatable, Sendable {
     let memberCount: UInt32
 }
 
+// Only sharing candidates occupy this side table; ordinary node records stay 60 bytes.
+struct CloneMetadata: Codable, Hashable, Sendable {
+    let deviceID: UInt64
+    let fileID: UInt64
+    let cloneID: UInt64
+    let flags: UInt64
+    let referenceCount: UInt32?
+
+    // Documented names, empirically verified APFS encodings (not public SDK constants).
+    var sharesAllBlocks: Bool { flags & 0x40 != 0 }
+    var label: String { sharesAllBlocks ? "Full clone" : "May share blocks" }
+}
+
 struct NodeMetadata: Identifiable, Hashable, Sendable {
     let handle: NodeHandle
     let name: String
@@ -124,6 +137,8 @@ struct NodeMetadata: Identifiable, Hashable, Sendable {
     let directoryCount: Int
     let duplicateReferenceCount: Int
     let isDuplicateReference: Bool
+
+    var clone: CloneMetadata? = nil
 
     var id: String { handle.id }
     var isDirectory: Bool { kind == .directory || kind == .syntheticRoot }
@@ -168,6 +183,7 @@ struct ScanTree: Codable, Equatable, Sendable {
     private(set) var hardLinkGroups: [HardLinkGroup]
     private(set) var hardLinkMembers: [NodeID]
     let unreadableCount: Int
+    private(set) var clones: [NodeID: CloneMetadata]
 
     init(
         generation: TreeGeneration,
@@ -178,7 +194,8 @@ struct ScanTree: Codable, Equatable, Sendable {
         roots: [RootDescriptor],
         hardLinkGroups: [HardLinkGroup],
         hardLinkMembers: [NodeID],
-        unreadableCount: Int
+        unreadableCount: Int,
+        clones: [NodeID: CloneMetadata] = [:]
     ) {
         self.generation = generation
         self.rootID = rootID
@@ -189,6 +206,7 @@ struct ScanTree: Codable, Equatable, Sendable {
         self.hardLinkGroups = hardLinkGroups
         self.hardLinkMembers = hardLinkMembers
         self.unreadableCount = unreadableCount
+        self.clones = clones
     }
 
     var rootHandle: NodeHandle { handle(for: rootID) }
@@ -200,6 +218,7 @@ struct ScanTree: Codable, Equatable, Sendable {
             + roots.capacity * MemoryLayout<RootDescriptor>.stride
             + hardLinkGroups.capacity * MemoryLayout<HardLinkGroup>.stride
             + hardLinkMembers.capacity * MemoryLayout<NodeID>.stride
+            + clones.capacity * (MemoryLayout<NodeID>.stride + MemoryLayout<CloneMetadata>.stride + 1)
     }
 
     func handle(for nodeID: NodeID) -> NodeHandle {
@@ -232,7 +251,8 @@ struct ScanTree: Codable, Equatable, Sendable {
             fileCount: Int(record.recursiveFileCount),
             directoryCount: Int(record.recursiveDirectoryCount),
             duplicateReferenceCount: Int(record.duplicateReferenceCount),
-            isDuplicateReference: duplicate
+            isDuplicateReference: duplicate,
+            clone: clones[nodeID]
         )
     }
 
@@ -378,7 +398,20 @@ struct ScanTree: Codable, Equatable, Sendable {
         return current
     }
 
+    // Resolve only on demand; exclude hard-link aliases of the selected inode.
+    func clonePeers(of nodeID: NodeID) -> [NodeID] {
+        guard let clone = clones[nodeID], clone.sharesAllBlocks else { return [] }
+        return clones.compactMap { id, other in
+            other.sharesAllBlocks && other.deviceID == clone.deviceID
+                && other.cloneID == clone.cloneID && other.fileID != clone.fileID ? id : nil
+        }.sorted()
+    }
+
     func validate() throws {
+        for (id, clone) in clones {
+            guard isValid(id), kind(of: id) == .file, clone.cloneID != 0,
+                  clone.flags & 0x41 != 0 else { throw ScanTreeValidationError.invalidKind(id) }
+        }
         guard isValid(rootID) else { throw ScanTreeValidationError.invalidRoot(rootID) }
         guard nodes[index(of: rootID)].parent == .null else { throw ScanTreeValidationError.invalidRoot(rootID) }
         var describedRoots = Set<NodeID>()
@@ -513,6 +546,7 @@ struct ScanTreeBuilder {
     private(set) var nameBytes: [UInt8] = []
     private var lastChildren: [NodeID] = []
     private var roots: [RootDescriptor] = []
+    private var clones: [NodeID: CloneMetadata] = [:]
     private var identityMembers: [FileIdentity: [NodeID]] = [:]
     private var unreadableCount = 0
     let rootID: NodeID
@@ -548,7 +582,8 @@ struct ScanTreeBuilder {
         logicalBytes: Int64,
         modifiedAt: Date?,
         identity: FileIdentity?,
-        unreadable: Bool = false
+        unreadable: Bool = false,
+        clone: CloneMetadata? = nil
     ) -> NodeID {
         precondition(Int(parent.rawValue) < nodes.count)
         let nameRange = appendName(name)
@@ -572,6 +607,7 @@ struct ScanTreeBuilder {
         lastChildren.append(.null)
         link(nodeID, to: parent)
         if unreadable { unreadableCount += 1 }
+        if kind == .file, let clone { clones[nodeID] = clone }
         if kind == .file, let identity {
             identityMembers[identity, default: []].append(nodeID)
         }
@@ -685,7 +721,8 @@ struct ScanTreeBuilder {
             roots: roots,
             hardLinkGroups: groups,
             hardLinkMembers: members,
-            unreadableCount: unreadableCount
+            unreadableCount: unreadableCount,
+            clones: clones
         )
         // The builder establishes these invariants as it appends and finalizes nodes.
         // Re-walking the entire tree here adds a second recursive O(n) pass to every

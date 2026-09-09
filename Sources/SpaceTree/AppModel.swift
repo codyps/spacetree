@@ -249,7 +249,7 @@ final class ScanTarget: Identifiable {
     }
 
     func rescan() {
-        if state == .complete, changeTrackingAvailable, !hasFilesystemChanges {
+        if state == .complete, changeTrackingAvailable, !hasFilesystemChanges, !requiresFullRescan {
             scannedAt = Date()
             return
         }
@@ -278,6 +278,7 @@ final class ScanTarget: Identifiable {
             scannedAt = snapshot.scannedAt
             scanDuration = snapshot.scanDuration
             scanStatistics = snapshot.statistics
+            requiresFullRescan = snapshot.requiresMetadataRefresh
             state = .complete
             startChangeTracking(since: snapshot.fseventID)
         }

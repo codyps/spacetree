@@ -58,6 +58,7 @@ enum DiskScanner {
         let logicalSize: Int64
         let modifiedAt: Date?
         let identity: FileIdentity?
+        let clone: CloneMetadata?
     }
 
     private struct DirectoryWork: Sendable {
@@ -129,7 +130,8 @@ enum DiskScanner {
         guard !changedPaths.isEmpty else { return existingRoot }
         // Multi-root and system-volume refreshes need the scan-wide identity set:
         // independently replacing subtrees can reintroduce firmlink aliases.
-        if scanRoots.count > 1 || scanRoots.contains(where: { $0.url.standardizedFileURL.path == "/" }) {
+        // Clone mutations can also change metadata on peers outside the changed subtree.
+        if !existingRoot.clones.isEmpty || scanRoots.count > 1 || scanRoots.contains(where: { $0.url.standardizedFileURL.path == "/" }) {
             return try await scan(
                 roots: scanRoots,
                 displayName: existingRoot.metadata(for: existingRoot.rootID).name,
@@ -154,7 +156,7 @@ enum DiskScanner {
         var replacements: [String: ScanTree] = [:]
         for path in coalesced {
             let replacement = try await scan(url: URL(fileURLWithPath: path, isDirectory: true), statistics: statistics, progress: progress)
-            if replacement.hardLinkReferenceCount > 0 {
+            if replacement.hardLinkReferenceCount > 0 || !replacement.clones.isEmpty {
                 let name = existingRoot.metadata(for: existingRoot.rootID).name
                 return try await scan(
                     roots: scanRoots,
@@ -243,7 +245,7 @@ enum DiskScanner {
                             try Task.checkCancellation()
                             await enumerationLimiter.acquire()
                             let started = ContinuousClock.now
-                            let result = enumerate(work)
+                            let result = enumerate(work, statistics: statistics)
                             statistics?.directory(path: work.url.path, duration: started.duration(to: .now), entries: result.entries.count)
                             await enumerationLimiter.release()
                             return result
@@ -274,7 +276,8 @@ enum DiskScanner {
                             allocatedBytes: entry.kind == .symlink ? 0 : entry.size,
                             logicalBytes: entry.kind == .symlink ? 0 : entry.logicalSize,
                             modifiedAt: entry.modifiedAt,
-                            identity: entry.kind == .file ? entry.identity : nil
+                            identity: entry.kind == .file ? entry.identity : nil,
+                            clone: entry.clone
                         )
                         if entry.kind == .directory {
                             pending.append(DirectoryWork(
@@ -313,19 +316,21 @@ enum DiskScanner {
         }.value
     }
 
-    private static func enumerate(_ work: DirectoryWork) -> DirectoryBatch {
-        if let entries = bulkEntries(at: work.url, rootDevice: work.rootDevice) {
+    private static func enumerate(_ work: DirectoryWork, statistics: ScanStatisticsRecorder?) -> DirectoryBatch {
+        if let entries = bulkEntries(at: work.url, rootDevice: work.rootDevice, statistics: statistics) {
             return DirectoryBatch(work: work, entries: entries, unreadable: false)
         }
         return DirectoryBatch(work: work, entries: [], unreadable: true)
     }
 
-    private static func bulkEntries(at directory: URL, rootDevice: UInt64?) -> [EntryMetadata]? {
+    private static func bulkEntries(at directory: URL, rootDevice: UInt64?, statistics: ScanStatisticsRecorder?) -> [EntryMetadata]? {
         var pointer: UnsafeMutablePointer<st_directory_entry_t>?
         var count = 0
+        var diagnostics = st_directory_diagnostics_t()
         let error = directory.withUnsafeFileSystemRepresentation { path in
-            st_list_directory(path, &pointer, &count)
+            st_list_directory_with_diagnostics(path, &pointer, &count, &diagnostics)
         }
+        statistics?.filesystemRead(diagnostics)
         guard error == 0 else { return nil }
         defer { st_free_directory_entries(pointer, count) }
         guard let pointer else { return [] }
@@ -355,6 +360,12 @@ enum DiskScanner {
                 modifiedAt: modifiedAt,
                 identity: record.file_id != 0 && (kind == .directory || (kind == .file && record.link_count > 1))
                     ? FileIdentity(device: record.device_id, inode: record.file_id)
+                    : nil,
+                clone: kind == .file && record.clone_valid_attrs & 0x300 == 0x300
+                    && record.clone_id != 0 && record.clone_flags & 0x41 != 0
+                    ? CloneMetadata(deviceID: record.device_id, fileID: record.file_id,
+                                    cloneID: record.clone_id, flags: record.clone_flags,
+                                    referenceCount: record.clone_valid_attrs & 0x1000 != 0 ? record.clone_refcount : nil)
                     : nil
             ))
         }
@@ -460,7 +471,8 @@ enum DiskScanner {
                     logicalBytes: metadata.logicalBytes,
                     modifiedAt: metadata.modifiedAt,
                     identity: nil,
-                    unreadable: source.isUnreadable(child)
+                    unreadable: source.isUnreadable(child),
+                    clone: metadata.clone
                 )
                 if metadata.isDirectory {
                     copyContents(from: source, sourceParent: child, to: destination, builder: &builder)

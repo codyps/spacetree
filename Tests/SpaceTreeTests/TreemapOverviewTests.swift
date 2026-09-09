@@ -104,7 +104,7 @@ import Testing
     continuation.finish()
 }
 
-@Test func groupedBlocksStaySmallShowDirectoryAndResolveIndividualHover() throws {
+@Test func singleGroupedRegionShowsDirectoryAndResolvesIndividualHover() throws {
     var builder = ScanTreeBuilder(rootName: "Tiny Files", rootURL: URL(fileURLWithPath: "/tmp/tiny"))
     for index in 0..<40_000 {
         _ = builder.addNode(parent: builder.rootID, name: "file-\(index)", kind: .file,
@@ -113,12 +113,12 @@ import Testing
     let tree = try builder.finalize()
     let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
                                       in: CGRect(x: 0, y: 0, width: 400, height: 200))
-    #expect(scene.tiles.count > 10)
+    #expect(scene.tiles.count == 1)
     #expect(scene.tiles.count < 40_000)
     #expect(scene.totalSize == 40_000)
     #expect(scene.representedFileCount == 40_000)
     for tile in scene.tiles {
-        #expect(tile.rect.width * tile.rect.height <= 4_096.01)
+        #expect(tile.rect == CGRect(x: 0, y: 0, width: 400, height: 200))
         #expect(scene.label(for: scene.entries[tile.entryIndex]).hasPrefix("Tiny Files · "))
     }
     #expect(!scene.labeledTileIndices.isEmpty)
@@ -180,4 +180,31 @@ import Testing
     #expect(try scene.deletionRects(for: []).isEmpty)
     #expect(scene.representedFileCount == 100)
     #expect(scene.totalSize == 100)
+}
+
+@Test func groupedTailSortsAfterVisibleFilesEvenWhenItsCombinedAreaIsLarger() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    var visible: [NodeID] = []
+    for size in [100, 300, 200] {
+        visible.append(builder.addNode(parent: builder.rootID, name: "large-\(size)", kind: .file,
+                                       allocatedBytes: Int64(size), logicalBytes: Int64(size), modifiedAt: nil, identity: nil))
+    }
+    for index in 0..<10_000 {
+        _ = builder.addNode(parent: builder.rootID, name: "tiny-\(index)", kind: .file,
+                            allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
+    }
+    let tree = try builder.finalize()
+    let bounds = CGRect(x: 0, y: 0, width: 200, height: 100)
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID), in: bounds)
+    #expect(scene.entries.filter { $0.isAggregate }.count == 1)
+    #expect(scene.entries.map(\.nodeID) == [visible[1], visible[2], visible[0], tree.rootID])
+    #expect(scene.entries.last?.allocatedBytes == 10_000)
+    #expect(scene.totalSize == 10_600)
+    #expect(scene.representedFileCount == 10_003)
+    let area = scene.tiles.reduce(0) { $0 + $1.rect.width * $1.rect.height }
+    #expect(abs(area - bounds.width * bounds.height) < 0.001)
+    for tile in scene.tiles {
+        let bytes = scene.entries[tile.entryIndex].allocatedBytes
+        #expect(abs(tile.rect.width * tile.rect.height / area - Double(bytes) / 10_600) < 0.000001)
+    }
 }

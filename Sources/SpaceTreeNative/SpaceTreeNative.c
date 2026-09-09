@@ -39,6 +39,9 @@ typedef struct __attribute__((packed, aligned(4))) {
     uint32_t link_count;
     off_t total_size;
     off_t allocated_size;
+    uint64_t clone_id;
+    uint64_t clone_flags;
+    uint32_t clone_refcount;
 } st_bulk_record_t;
 
 static st_entry_kind_t st_kind(fsobj_type_t type) {
@@ -54,23 +57,29 @@ static int st_append(
     st_directory_entry_t **entries,
     size_t *count,
     size_t *capacity,
-    const st_bulk_record_t *record
+    const st_bulk_record_t *record,
+    const char *name,
+    int include_clones
 ) {
     if (*count == *capacity) {
         size_t new_capacity = *capacity == 0 ? 256 : *capacity * 2;
+        if (new_capacity < *capacity || new_capacity > SIZE_MAX / sizeof(**entries)) return ENOMEM;
         void *new_entries = realloc(*entries, new_capacity * sizeof(**entries));
         if (new_entries == NULL) return ENOMEM;
         *entries = new_entries;
         *capacity = new_capacity;
     }
 
-    const char *name = ((const char *)&record->name) + record->name.attr_dataoffset;
     st_directory_entry_t *entry = &(*entries)[*count];
     entry->name = strdup(name);
     if (entry->name == NULL) return ENOMEM;
     entry->device_id = (uint64_t)record->device;
     entry->file_id = record->file_id;
     entry->link_count = record->link_count;
+    entry->clone_valid_attrs = include_clones ? record->returned.forkattr : 0;
+    entry->clone_id = include_clones ? record->clone_id : 0;
+    entry->clone_flags = include_clones ? record->clone_flags : 0;
+    entry->clone_refcount = include_clones ? record->clone_refcount : 0;
     entry->logical_size = (int64_t)record->total_size;
     entry->allocated_size = (int64_t)record->allocated_size;
     entry->modified_seconds = record->modified.tv_sec;
@@ -110,6 +119,9 @@ static int st_append_stat(
     entry->device_id = (uint64_t)metadata->st_dev;
     entry->file_id = (uint64_t)metadata->st_ino;
     entry->link_count = (uint32_t)metadata->st_nlink;
+    entry->clone_valid_attrs = 0;
+    entry->clone_id = entry->clone_flags = 0;
+    entry->clone_refcount = 0;
     entry->logical_size = (int64_t)metadata->st_size;
     entry->allocated_size = (int64_t)metadata->st_blocks * 512;
     entry->modified_seconds = metadata->st_mtimespec.tv_sec;
@@ -155,7 +167,8 @@ static int st_list_directory_fallback(
 static int st_list_directory_impl(
     const char *path,
     st_directory_entry_t **entries,
-    size_t *entry_count
+    size_t *entry_count,
+    st_directory_diagnostics_t *diagnostics
 ) {
     if (path == NULL || entries == NULL || entry_count == NULL) return EINVAL;
     *entries = NULL;
@@ -181,6 +194,9 @@ static int st_list_directory_impl(
         | ATTR_CMN_FILEID;
     attributes.fileattr = ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE;
 
+    attributes.forkattr = ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_EXT_FLAGS | ATTR_CMNEXT_CLONE_REFCNT;
+    int include_clones = 1;
+
     const size_t buffer_size = 256 * 1024;
     void *buffer = malloc(buffer_size);
     if (buffer == NULL) {
@@ -193,42 +209,83 @@ static int st_list_directory_impl(
     size_t capacity = 0;
     int error = 0;
     for (;;) {
+        diagnostics->bulk_calls++;
         int batch_count = getattrlistbulk(
             descriptor,
             &attributes,
             buffer,
             buffer_size,
             FSOPT_NOFOLLOW | FSOPT_PACK_INVAL_ATTRS | FSOPT_RETURN_REALDEV
+                | (include_clones ? FSOPT_ATTR_CMN_EXTENDED : 0)
         );
         if (batch_count == 0) break;
         if (batch_count < 0) {
             error = errno;
+            diagnostics->bulk_error = error;
+            // Unsupported extended attributes must not disable the ordinary bulk path.
+            if (include_clones && (error == EINVAL || error == ENOTSUP || error == E2BIG)) {
+                st_free_directory_entries(result, count);
+                result = NULL; count = 0; capacity = 0;
+                if (lseek(descriptor, 0, SEEK_SET) < 0) break;
+                include_clones = 0;
+                attributes.forkattr = 0;
+                diagnostics->clone_query_retries++;
+                error = 0;
+                continue;
+            }
             break;
         }
+        diagnostics->bulk_entries += batch_count;
 
         char *cursor = buffer;
         for (int index = 0; index < batch_count; index++) {
-            st_bulk_record_t *record = (st_bulk_record_t *)cursor;
-            if (record->length < sizeof(st_bulk_record_t)
-                || cursor + record->length > (char *)buffer + buffer_size) {
+            size_t remaining = (char *)buffer + buffer_size - cursor;
+            const size_t common_size = offsetof(st_bulk_record_t, link_count);
+            const size_t file_size = offsetof(st_bulk_record_t, clone_id) - common_size;
+            const size_t clone_size = sizeof(st_bulk_record_t) - offsetof(st_bulk_record_t, clone_id);
+            st_bulk_record_t record = {0};
+            if (remaining < common_size) { error = EIO; break; }
+            memcpy(&record, cursor, common_size);
+            if (!(record.returned.commonattr & ATTR_CMN_OBJTYPE)) { error = EIO; break; }
+            // PACK_INVAL_ATTRS packs unsupported fields, but file attributes are
+            // omitted entirely for directories. Extended common fields follow
+            // whichever file fields were actually requested for this vnode type.
+            size_t fixed_size = common_size + (record.object_type == VDIR ? 0 : file_size)
+                + (include_clones ? clone_size : 0);
+            if (remaining < fixed_size || record.length < fixed_size) { error = EIO; break; }
+            size_t offset = common_size;
+            if (record.object_type != VDIR) {
+                memcpy((char *)&record + common_size, cursor + offset, file_size);
+                offset += file_size;
+            }
+            if (include_clones) memcpy(&record.clone_id, cursor + offset, clone_size);
+            int64_t name_offset = (int64_t)offsetof(st_bulk_record_t, name) + record.name.attr_dataoffset;
+            if (record.length < fixed_size || record.length > remaining
+                || !(record.returned.commonattr & ATTR_CMN_NAME)
+                || name_offset < (int64_t)fixed_size || name_offset >= record.length
+                || record.name.attr_length == 0
+                || record.name.attr_length > record.length - name_offset
+                || memchr(cursor + name_offset, 0, record.name.attr_length) == NULL) {
                 error = EIO;
                 break;
             }
-            error = st_append(&result, &count, &capacity, record);
+            error = st_append(&result, &count, &capacity, &record, cursor + name_offset, include_clones);
             if (error != 0) break;
-            cursor += record->length;
+            cursor += record.length;
         }
         if (error != 0) break;
     }
 
     free(buffer);
     if (error != 0 && error != EDEADLK) {
+        diagnostics->fallback_directories++;
+        diagnostics->bulk_error = error;
         st_free_directory_entries(result, count);
         result = NULL;
         count = 0;
         capacity = 0;
-        (void)lseek(descriptor, 0, SEEK_SET);
-        error = st_list_directory_fallback(descriptor, &result, &count, &capacity);
+        if (lseek(descriptor, 0, SEEK_SET) < 0) error = errno;
+        else error = st_list_directory_fallback(descriptor, &result, &count, &capacity);
     }
     close(descriptor);
     if (error != 0) {
@@ -248,7 +305,11 @@ void st_free_directory_entries(st_directory_entry_t *entries, size_t entry_count
 
 // Keep the thread override inside synchronous C: Swift tasks can change threads
 // at suspension points. A process policy alone can be overridden by a thread.
-int st_list_directory(const char *path, st_directory_entry_t **entries, size_t *entry_count) {
+int st_list_directory_with_diagnostics(const char *path, st_directory_entry_t **entries, size_t *entry_count,
+                                       st_directory_diagnostics_t *diagnostics) {
+    st_directory_diagnostics_t unused = {0};
+    if (diagnostics == NULL) diagnostics = &unused;
+    memset(diagnostics, 0, sizeof(*diagnostics));
     if (path == NULL || entries == NULL || entry_count == NULL) return EINVAL;
     *entries = NULL;
     *entry_count = 0;
@@ -257,7 +318,7 @@ int st_list_directory(const char *path, st_directory_entry_t **entries, size_t *
     int previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD);
     if (previous < 0) return errno;
     if (setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, IOPOL_MATERIALIZE_DATALESS_FILES_OFF) != 0) return errno;
-    error = st_list_directory_impl(path, entries, entry_count);
+    error = st_list_directory_impl(path, entries, entry_count, diagnostics);
     int restore = setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, previous);
     if (restore != 0 && error == 0) {
         error = errno;
@@ -266,4 +327,8 @@ int st_list_directory(const char *path, st_directory_entry_t **entries, size_t *
         *entry_count = 0;
     }
     return error;
+}
+
+int st_list_directory(const char *path, st_directory_entry_t **entries, size_t *entry_count) {
+    return st_list_directory_with_diagnostics(path, entries, entry_count, NULL);
 }

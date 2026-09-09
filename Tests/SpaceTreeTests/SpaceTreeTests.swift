@@ -403,7 +403,10 @@ import SpaceTreeNative
 @Test func optionalFilesystemScanBenchmark() async throws {
     guard let path = ProcessInfo.processInfo.environment["SPACETREE_SCAN_BENCHMARK_PATH"], !path.isEmpty else { return }
     let started = ContinuousClock.now
-    let tree = try await DiskScanner.scan(url: URL(fileURLWithPath: path, isDirectory: true)) { _ in }
+    let recorder = ScanStatisticsRecorder(targetID: path, roots: [path], mode: "benchmark")
+    let tree = try await DiskScanner.scan(url: URL(fileURLWithPath: path, isDirectory: true), statistics: recorder) { _ in }
+    let stats = recorder.finish(outcome: "complete", progress: ScanProgress(currentPath: "", itemCount: 0, bytesFound: 0, unreadableCount: 0), tree: tree)
+    print("Filesystem reads: \(String(describing: stats?.filesystemReads)); clone candidates=\(tree.clones.count)")
     let elapsed = started.duration(to: .now)
     print("SpaceTree filesystem benchmark: path=\(path) nodes=\(tree.nodeCount) elapsed=\(elapsed)")
     try tree.validate()
@@ -591,8 +594,9 @@ private func childMetadata(_ tree: ScanTree, _ nodeID: NodeID) -> [NodeMetadata]
         fseventID: 0, statistics: stats)
     let restored = try SnapshotStore.decode(SnapshotStore.encode(snapshot))
     #expect(restored.statistics == stats)
+    #expect(!restored.requiresMetadataRefresh)
     let json = try #require(JSONSerialization.jsonObject(with: stats.jsonData()) as? [String: Any])
-    #expect(json["schemaVersion"] as? Int == 1)
+    #expect(json["schemaVersion"] as? Int == 2)
     #expect(json["outcome"] as? String == "complete")
     let historyDirectory = directory.appendingPathComponent("history")
     let store = ScanStatisticsStore(directory: historyDirectory)
@@ -603,13 +607,24 @@ private func childMetadata(_ tree: ScanTree, _ nodeID: NodeID) -> [NodeMetadata]
     // Version 2 ended immediately after the tree, without a statistics section.
     var legacySnapshot = snapshot
     legacySnapshot.statistics = nil
+    var version3 = try SnapshotStore.encode(legacySnapshot)
+    version3.removeLast(32)
+    version3.removeSubrange((version3.count - 12)..<(version3.count - 8)) // Empty clone table.
+    version3[8] = 3
+    version3.append(contentsOf: SHA256.hash(data: version3))
+    let decodedVersion3 = try SnapshotStore.decode(version3)
+    #expect(decodedVersion3.tree == tree)
+    #expect(decodedVersion3.statistics == nil)
+    #expect(decodedVersion3.requiresMetadataRefresh)
+
     var legacy = try SnapshotStore.encode(legacySnapshot)
-    legacy.removeLast(32 + 4 + 4) // SHA256, length prefix, JSON null
+    legacy.removeLast(32 + 4 + 4 + 4) // SHA256, statistics length/JSON null, empty clone table
     legacy[8] = 2
     legacy.append(contentsOf: SHA256.hash(data: legacy))
     let decodedLegacy = try SnapshotStore.decode(legacy)
     #expect(decodedLegacy.tree == tree)
     #expect(decodedLegacy.statistics == nil)
+    #expect(decodedLegacy.requiresMetadataRefresh)
 }
 
 @Test func cancelledStatisticsFreezeAndCannotFinishTwice() throws {

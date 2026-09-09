@@ -1,4 +1,5 @@
 import Foundation
+import SpaceTreeNative
 
 struct ScanStatistics: Codable, Equatable, Sendable {
     struct Phase: Codable, Equatable, Sendable {
@@ -10,7 +11,15 @@ struct ScanStatistics: Codable, Equatable, Sendable {
         let durationSeconds: Double
         let entries: Int
     }
-    var schemaVersion = 1
+    struct FilesystemReads: Codable, Equatable, Sendable {
+        var bulkCalls: UInt64 = 0
+        var bulkEntries: UInt64 = 0
+        var fallbackDirectories: UInt64 = 0
+        var cloneQueryRetries: UInt64 = 0
+        var bulkErrors: [Int32: Int] = [:]
+    }
+    var filesystemReads: FilesystemReads? = nil
+    var schemaVersion = 2
     let id: UUID
     let targetID: String
     let roots: [String]
@@ -61,12 +70,23 @@ final class ScanStatisticsRecorder: @unchecked Sendable {
     private var workerSeconds = 0.0
     private var slowest: [ScanStatistics.Directory] = []
     private var closed = false
+    private var filesystemReads = ScanStatistics.FilesystemReads()
 
     init(targetID: String, roots: [String], mode: String) {
         self.targetID = targetID
         self.roots = roots
         self.mode = mode
         self.phaseStart = start
+    }
+
+    func filesystemRead(_ read: st_directory_diagnostics_t) {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return }
+        filesystemReads.bulkCalls += read.bulk_calls
+        filesystemReads.bulkEntries += read.bulk_entries
+        filesystemReads.fallbackDirectories += read.fallback_directories
+        filesystemReads.cloneQueryRetries += read.clone_query_retries
+        if read.bulk_error != 0 { filesystemReads.bulkErrors[read.bulk_error, default: 0] += 1 }
     }
 
     func beginPhase(_ name: String) {
@@ -101,6 +121,7 @@ final class ScanStatisticsRecorder: @unchecked Sendable {
         let configuration = "release"
         #endif
         return ScanStatistics(
+            filesystemReads: filesystemReads,
             id: id, targetID: targetID, roots: roots, mode: mode,
             startedAt: startedAt, endedAt: Date(), outcome: outcome, error: error,
             durationSeconds: start.duration(to: now).seconds, phases: phases,
