@@ -643,13 +643,38 @@ struct ScanTreeBuilder {
         report("Resolving hard links", 0, identityMembers.count)
         var groups: [HardLinkGroup] = []
         var members: [NodeID] = []
-        let hardLinkIdentities = identityMembers.keys.sorted {
+        // A file may have links outside the scanned roots. Those singleton
+        // identities cannot form a group and need no deterministic sort.
+        var hardLinkIdentities: [FileIdentity] = []
+        for (identity, groupMembers) in identityMembers where groupMembers.count > 1 {
+            hardLinkIdentities.append(identity)
+        }
+        hardLinkIdentities.sort {
             $0.device == $1.device ? $0.inode < $1.inode : $0.device < $1.device
         }
+        // Reuse common directory paths across groups without retaining a path
+        // string for every directory in a multi-million-node scan.
+        var parentPaths: [NodeID: String] = [:]
         for (offset, identity) in hardLinkIdentities.enumerated() {
             report("Resolving hard links", offset, hardLinkIdentities.count)
             guard let groupMembers = identityMembers[identity], groupMembers.count > 1 else { continue }
-            let ordered = groupMembers.sorted { pathSortKey(of: $0) < pathSortKey(of: $1) }
+            // Compute each key once, keeping Swift String comparison (including
+            // Unicode equivalence) and stable ordering for equal paths intact.
+            let keyed = groupMembers.map { member -> (id: NodeID, path: String) in
+                let parent = nodes[Int(member.rawValue)].parent
+                let name = String(decoding: nameBytes(of: member), as: UTF8.self)
+                guard parent != rootID && parent != .null else { return (member, name) }
+                let prefix: String
+                if let cached = parentPaths[parent] {
+                    prefix = cached
+                } else {
+                    prefix = pathSortKey(of: parent)
+                    if parentPaths.count >= 4_096 { parentPaths.removeAll(keepingCapacity: true) }
+                    parentPaths[parent] = prefix
+                }
+                return (member, prefix + "/" + name)
+            }
+            let ordered = keyed.sorted { $0.path < $1.path }.map { $0.id }
             let canonical = ordered[0]
             let groupIndex = UInt32(groups.count)
             let memberStart = UInt32(members.count)
