@@ -44,6 +44,21 @@ enum TreemapLayout {
         return result
     }
 
+    // Split only the aggregate's geometry, retaining one logical entry. The small
+    // leading piece joins the final visible row; the rest occupies the remainder.
+    static func regions(weights: [Double], groupedTail: Bool, in bounds: CGRect) -> [[CGRect]] {
+        let weights = weights.map { max(1, $0) }
+        guard groupedTail, weights.count > 1, let tail = weights.last,
+              tail - weights[weights.count - 2] >= 1 else {
+            return rectangles(for: weights, in: bounds, weight: { $0 }).map { [$0] }
+        }
+        let leading = max(1, weights[weights.count - 2])
+        let expanded = Array(weights.dropLast()) + [leading, tail - leading]
+        let rects = rectangles(for: expanded, in: bounds, weight: { $0 })
+        guard rects.count == expanded.count else { return [] }
+        return rects.dropLast(2).map { [$0] } + [Array(rects.suffix(2))]
+    }
+
     private struct RowMetrics {
         var sum = 0.0
         var largest = 0.0
@@ -114,6 +129,15 @@ struct TreemapScene: Sendable {
     struct Tile: Sendable {
         let entryIndex: Int
         let rect: CGRect
+        var pieces: [CGRect] = []
+        var shape: [CGRect] { pieces.isEmpty ? [rect] : pieces }
+        var labelRect: CGRect { shape.max { $0.width * $0.height < $1.width * $1.height } ?? rect }
+        var path: CGPath {
+            let path = CGMutablePath()
+            for piece in shape { path.addRect(piece) }
+            return path
+        }
+        func contains(_ point: CGPoint) -> Bool { shape.contains { $0.contains(point) } }
     }
     struct Hit: Sendable {
         let entry: Entry
@@ -214,7 +238,7 @@ struct TreemapScene: Sendable {
                                                   category: FilePalette.category(forExtension: tree.fileExtension(of: entry.nodeID))) }
             tileLookup[entry.nodeID] = tiles.count
             entries.append(entry)
-            tiles.append(Tile(entryIndex: entries.count - 1, rect: region.rect))
+            tiles.append(Tile(entryIndex: entries.count - 1, rect: region.rect, pieces: region.pieces))
             completed += entry.representedFileCount
             if tiles.count.isMultiple(of: 256) {
                 onProgress(BuildProgress(stage: "Laying out tree…", completed: completed, total: totalFiles))
@@ -227,7 +251,7 @@ struct TreemapScene: Sendable {
         let hitIndex = try TreemapHitIndex(tiles: tiles, bounds: bounds)
         return TreemapScene(folders: folders, raster: raster, tree: tree, entries: entries, tiles: tiles,
                             labeledTileIndices: tiles.indices.filter {
-                                let rect = tiles[$0].rect
+                                let rect = tiles[$0].labelRect
                                 return entries[tiles[$0].entryIndex].isAggregate
                                     ? rect.width >= 36 && rect.height >= 24
                                     : rect.width >= 78 && rect.height >= 34
@@ -252,12 +276,19 @@ struct TreemapScene: Sendable {
         for (index, tile) in tiles.enumerated() {
             if index.isMultiple(of: 256) { try Task.checkCancellation() }
             context.setFillColor(colors[Int(entries[tile.entryIndex].category.rawValue)])
-            context.fill(tile.rect)
+            if tile.pieces.isEmpty {
+                context.fill(tile.rect)
+            } else {
+                context.addPath(tile.path)
+                context.fillPath()
+            }
             if entries[tile.entryIndex].isAggregate {
                 context.saveGState()
-                context.clip(to: tile.rect)
+                context.addPath(tile.path)
+                context.clip()
                 context.setFillColor(CGColor(gray: 0, alpha: 0.18))
-                context.fill(tile.rect)
+                context.addPath(tile.path)
+                context.fillPath()
                 context.setStrokeColor(CGColor(gray: 1, alpha: 0.25))
                 context.setLineWidth(1)
                 context.addPath(aggregateHatching(in: tile.rect))
@@ -267,7 +298,7 @@ struct TreemapScene: Sendable {
         }
         context.setShouldAntialias(true)
         context.setLineWidth(1)
-        for (index, tile) in tiles.enumerated() where tile.rect.width >= 3 && tile.rect.height >= 3 {
+        for (index, tile) in tiles.enumerated() where !entries[tile.entryIndex].isAggregate && tile.rect.width >= 3 && tile.rect.height >= 3 {
             if index.isMultiple(of: 256) { try Task.checkCancellation() }
             let rect = tile.rect
             context.setStrokeColor(CGColor(gray: 1, alpha: 0.30))
@@ -300,6 +331,7 @@ struct TreemapScene: Sendable {
     private struct NodeRegion {
         var entry: Entry
         let rect: CGRect
+        var pieces: [CGRect] = []
         var budget: Int = 1
         var members: [NodeID]? = nil
     }
@@ -383,11 +415,12 @@ struct TreemapScene: Sendable {
             if $0.entry.isAggregate != $1.entry.isAggregate { return !$0.entry.isAggregate }
             return $0.weight == $1.weight ? $0.entry.nodeID < $1.entry.nodeID : $0.weight > $1.weight
         }
-        let rectangles = TreemapLayout.rectangles(for: items, in: bounds, weight: \.weight)
+        let rectangles = TreemapLayout.regions(weights: items.map(\.weight),
+                                               groupedTail: items.last?.entry.isAggregate == true, in: bounds)
         try Task.checkCancellation()
         let spare = max(0, limit - items.count)
         return zip(items, rectangles).map {
-            NodeRegion(entry: $0.entry, rect: $1,
+            NodeRegion(entry: $0.entry, rect: $1.reduce(CGRect.null) { $0.union($1) }, pieces: $1.count > 1 ? $1 : [],
                        budget: 1 + Int((Double(spare) * $0.weight / total).rounded(.down)), members: $0.members)
         }
     }
@@ -400,45 +433,63 @@ struct TreemapScene: Sendable {
         let tile = tiles[index]
         let entry = entries[tile.entryIndex]
         if let range = entry.virtualRange, !range.isEmpty {
-            return virtualHit(at: point, range: range, in: tile.rect)
+            return virtualHit(at: point, range: range, in: tile.shape)
         }
         return Hit(entry: entry, rect: tile.rect)
     }
     // A weighted binary partition provides stable per-file hit rectangles without
     // storing or drawing them. Each pointer lookup takes logarithmic time.
-    private func virtualHit(at point: CGPoint, range: Range<Int>, in bounds: CGRect, index: Int? = nil) -> Hit {
+    // Partition actual occupied area, including a bend in the grouped tail.
+    // At most two rectangles are carried through each binary search step.
+    private func virtualRects(range: Range<Int>, in bounds: [CGRect], point: CGPoint, index: Int? = nil) -> (Int, [CGRect]) {
         var lower = range.lowerBound, upper = range.upperBound
-        var rect = bounds
+        var pieces = bounds
         func prefix(_ index: Int) -> Double { index == range.lowerBound ? 0 : virtualWeights[index - 1] }
         while upper - lower > 1 {
             let middle = lower + (upper - lower) / 2
             let total = prefix(upper) - prefix(lower)
             let fraction = total > 0 ? (prefix(middle) - prefix(lower)) / total : 0.5
-            if rect.width >= rect.height {
-                let split = rect.minX + rect.width * fraction
-                if index.map({ $0 < middle }) ?? (point.x < split) {
-                    rect.size.width = split - rect.minX
-                    upper = middle
-                } else {
-                    rect.size.width = rect.maxX - split
-                    rect.origin.x = split
-                    lower = middle
+            let box = pieces.reduce(CGRect.null) { $0.union($1) }
+            let horizontal = box.width >= box.height
+            let edges = Set(pieces.flatMap { horizontal ? [$0.minX, $0.maxX] : [$0.minY, $0.maxY] }).sorted()
+            var remaining = pieces.reduce(0.0) { $0 + $1.width * $1.height } * fraction
+            var split = edges[0]
+            for (start, end) in zip(edges, edges.dropFirst()) {
+                let cross = pieces.reduce(0.0) { sum, rect in
+                    let covers = horizontal ? rect.minX <= start && rect.maxX >= end : rect.minY <= start && rect.maxY >= end
+                    return sum + (covers ? (horizontal ? rect.height : rect.width) : 0)
                 }
-            } else {
-                let split = rect.minY + rect.height * fraction
-                if index.map({ $0 < middle }) ?? (point.y < split) {
-                    rect.size.height = split - rect.minY
-                    upper = middle
-                } else {
-                    rect.size.height = rect.maxY - split
-                    rect.origin.y = split
-                    lower = middle
+                if cross > 0 && remaining <= (end - start) * cross {
+                    split = start + remaining / cross
+                    break
                 }
+                remaining -= (end - start) * cross
             }
+            let first = index.map { $0 < middle } ?? (horizontal ? point.x < split : point.y < split)
+            pieces = pieces.compactMap { rect in
+                let clipped: CGRect
+                if horizontal {
+                    let start = first ? rect.minX : max(rect.minX, split)
+                    let end = first ? min(rect.maxX, split) : rect.maxX
+                    clipped = CGRect(x: start, y: rect.minY, width: max(0, end - start), height: rect.height)
+                } else {
+                    let start = first ? rect.minY : max(rect.minY, split)
+                    let end = first ? min(rect.maxY, split) : rect.maxY
+                    clipped = CGRect(x: rect.minX, y: start, width: rect.width, height: max(0, end - start))
+                }
+                return clipped.width > 0 && clipped.height > 0 ? clipped : nil
+            }
+            if first { upper = middle } else { lower = middle }
         }
-        let id = virtualNodes[lower]
+        return (lower, pieces)
+    }
+
+    private func virtualHit(at point: CGPoint, range: Range<Int>, in bounds: [CGRect]) -> Hit {
+        let (index, pieces) = virtualRects(range: range, in: bounds, point: point)
+        let id = virtualNodes[index]
         return Hit(entry: Entry(nodeID: id, allocatedBytes: tree.allocatedBytes(of: id),
-                                category: FilePalette.category(forExtension: tree.fileExtension(of: id))), rect: rect)
+                                category: FilePalette.category(forExtension: tree.fileExtension(of: id))),
+                   rect: pieces.first { $0.contains(point) } ?? pieces[0])
     }
 
     func deletionRects(for ids: Set<NodeID>) throws -> [CGRect] {
@@ -462,7 +513,7 @@ struct TreemapScene: Sendable {
             for index in range {
                 if index.isMultiple(of: 1_024) { try Task.checkCancellation() }
                 if let isFolder = hidden.removeValue(forKey: virtualNodes[index]) {
-                    result.append(isFolder ? tile.rect : virtualHit(at: .zero, range: range, in: tile.rect, index: index).rect)
+                    result.append(contentsOf: isFolder ? tile.shape : virtualRects(range: range, in: tile.shape, point: .zero, index: index).1)
                     if hidden.isEmpty { return result }
                 }
             }
@@ -510,7 +561,7 @@ private struct TreemapHitIndex: Sendable {
         guard bounds.contains(point), bounds.width > 0, bounds.height > 0 else { return nil }
         let column = min(columns - 1, max(0, Int((point.x - bounds.minX) / bounds.width * Double(columns))))
         let row = min(rows - 1, max(0, Int((point.y - bounds.minY) / bounds.height * Double(rows))))
-        return buckets[row * columns + column].first { tiles[$0].rect.contains(point) }
+        return buckets[row * columns + column].first { tiles[$0].contains(point) }
     }
 
     private static func bucketRange(

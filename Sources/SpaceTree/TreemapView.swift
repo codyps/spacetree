@@ -156,11 +156,11 @@ private struct TreemapBaseLayer: View, Equatable {
             } else {
                 // The fallback is bounded by the same visible-region budget.
                 for tile in scene.tiles {
-                    context.fill(Path(tile.rect), with: .color(FilePalette.color(for: scene.entries[tile.entryIndex].category)))
+                    context.fill(Path(tile.path), with: .color(FilePalette.color(for: scene.entries[tile.entryIndex].category)))
                     if scene.entries[tile.entryIndex].isAggregate {
                         var grouped = context
-                        grouped.clip(to: Path(tile.rect))
-                        grouped.fill(Path(tile.rect), with: .color(.black.opacity(0.18)))
+                        grouped.clip(to: Path(tile.path))
+                        grouped.fill(Path(tile.path), with: .color(.black.opacity(0.18)))
                         grouped.stroke(Path(TreemapScene.aggregateHatching(in: tile.rect)),
                                        with: .color(.white.opacity(0.25)), lineWidth: 1)
                     }
@@ -177,7 +177,7 @@ private struct TreemapBaseLayer: View, Equatable {
                 let tile = scene.tiles[tileIndex]
                 let entry = scene.entries[tile.entryIndex]
                 let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
-                let rect = tile.rect.insetBy(dx: gap, dy: gap)
+                let rect = tile.labelRect.insetBy(dx: gap, dy: gap)
                 let label = Text(scene.label(for: entry))
                     .font(.system(size: entry.isAggregate ? 10 : 11, weight: .semibold))
                     .foregroundStyle(.white)

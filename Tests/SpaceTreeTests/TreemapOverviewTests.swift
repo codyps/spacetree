@@ -22,7 +22,7 @@ import Testing
     #expect(aggregate.nodeID == folder)
     #expect(aggregate.representedFileCount == 100)
     #expect(aggregate.allocatedBytes == 100)
-    let area = overview.tiles.reduce(0) { $0 + $1.rect.width * $1.rect.height }
+    let area = overview.tiles.reduce(0) { $0 + $1.shape.reduce(0) { $0 + $1.width * $1.height } }
     #expect(abs(area - bounds.width * bounds.height) < 0.001)
     let detail = try TreemapScene.build(tree: tree, nodes: tree.children(of: folder), in: bounds)
     #expect(detail.tiles.count == 100)
@@ -201,10 +201,76 @@ import Testing
     #expect(scene.entries.last?.allocatedBytes == 10_000)
     #expect(scene.totalSize == 10_600)
     #expect(scene.representedFileCount == 10_003)
-    let area = scene.tiles.reduce(0) { $0 + $1.rect.width * $1.rect.height }
+    let area = scene.tiles.reduce(0) { $0 + $1.shape.reduce(0) { $0 + $1.width * $1.height } }
     #expect(abs(area - bounds.width * bounds.height) < 0.001)
     for tile in scene.tiles {
         let bytes = scene.entries[tile.entryIndex].allocatedBytes
-        #expect(abs(tile.rect.width * tile.rect.height / area - Double(bytes) / 10_600) < 0.000001)
+        #expect(abs(tile.shape.reduce(0) { $0 + $1.width * $1.height } / area - Double(bytes) / 10_600) < 0.000001)
+    }
+}
+
+@Test func groupedTailFollowsRemainingSpaceWithoutOverlap() {
+    for bounds in [CGRect(x: 17, y: 23, width: 200, height: 100),
+                   CGRect(x: -20, y: 12, width: 100, height: 200)] {
+        let weights = [300.0, 200, 100, 10_000]
+        let regions = TreemapLayout.regions(weights: weights, groupedTail: true, in: bounds)
+        #expect(regions.count == 4)
+        let tail = regions[3]
+        #expect(tail.count == 2)
+        let tailArea = tail.reduce(0) { $0 + $1.width * $1.height }
+        let box = tail.reduce(CGRect.null) { $0.union($1) }
+        #expect(tailArea < box.width * box.height)
+        #expect(tail[0].insetBy(dx: -0.00001, dy: -0.00001).intersects(tail[1]))
+        for (index, region) in regions.enumerated() {
+            let area = region.reduce(0) { $0 + $1.width * $1.height }
+            #expect(abs(area / (bounds.width * bounds.height) - weights[index] / 10_600) < 0.000001)
+        }
+        let pieces = regions.flatMap { $0 }
+        for (index, piece) in pieces.enumerated() {
+            #expect(piece.width > 0 && piece.height > 0)
+            #expect(bounds.insetBy(dx: -0.00001, dy: -0.00001).contains(piece))
+            for other in pieces.dropFirst(index + 1) {
+                let overlap = piece.intersection(other)
+                #expect(overlap.isNull || overlap.width * overlap.height < 0.000001)
+            }
+        }
+    }
+    #expect(TreemapLayout.regions(weights: [100], groupedTail: true,
+                                   in: CGRect(x: 0, y: 0, width: 10, height: 10)).count == 1)
+    #expect(TreemapLayout.regions(weights: [100, 10], groupedTail: true, in: .zero).isEmpty)
+}
+
+@Test func bentGroupedTailResolvesFilesAndDeletionMarkersInBothArms() throws {
+    var builder = ScanTreeBuilder(rootName: "map", rootURL: URL(fileURLWithPath: "/tmp/map"))
+    for size in [300, 200, 100] {
+        _ = builder.addNode(parent: builder.rootID, name: "large-\(size)", kind: .file,
+                            allocatedBytes: Int64(size), logicalBytes: Int64(size), modifiedAt: nil, identity: nil)
+    }
+    for index in 0..<10_000 {
+        _ = builder.addNode(parent: builder.rootID, name: "tiny-\(index)", kind: .file,
+                            allocatedBytes: 1, logicalBytes: 1, modifiedAt: nil, identity: nil)
+    }
+    let tree = try builder.finalize()
+    let scene = try TreemapScene.build(tree: tree, nodes: tree.children(of: tree.rootID),
+                                      in: CGRect(x: 17, y: 23, width: 200, height: 100))
+    let tile = try #require(scene.tiles.last)
+    #expect(tile.shape.count == 2)
+    #expect(scene.entries.filter { $0.isAggregate }.count == 1)
+    #expect(scene.entries[tile.entryIndex].nodeID == tree.rootID)
+    #expect(tile.shape.contains(tile.labelRect))
+    for piece in tile.shape {
+        for fraction in [0.1, 0.5, 0.9] {
+            let point = CGPoint(x: piece.minX + piece.width * fraction, y: piece.midY)
+            let hit = try #require(scene.hit(at: point))
+            #expect(tree.name(of: hit.entry.nodeID).hasPrefix("tiny-"))
+            #expect(hit.rect.contains(point))
+            let markers = try scene.deletionRects(for: [hit.entry.nodeID])
+            #expect(markers.contains(hit.rect))
+            #expect(abs(markers.reduce(0) { $0 + $1.width * $1.height } - 20_000.0 / 10_600) < 0.000001)
+            for marker in markers { #expect(tile.shape.contains { $0.insetBy(dx: -0.000001, dy: -0.000001).contains(marker) }) }
+        }
+    }
+    for visible in scene.tiles.dropLast() {
+        #expect(scene.hit(at: CGPoint(x: visible.rect.midX, y: visible.rect.midY))?.entry.nodeID == scene.entries[visible.entryIndex].nodeID)
     }
 }
