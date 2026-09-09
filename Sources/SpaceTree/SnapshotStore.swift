@@ -178,7 +178,16 @@ enum SnapshotStore {
         guard Data(hash.finalize()) == expected else { throw SnapshotFormatError.invalidChecksum }
         reportProgress("Loading previous scan…")
 
-        var reader = BinaryReader(data: payload)
+        // Borrow the mapped storage for the entire parse. The reader cannot escape
+        // this closure, and its bounds exclude the checksum trailer.
+        return try payload.withUnsafeBytes { bytes in
+            try decodePayload(bytes, reportProgress: reportProgress)
+        }
+    }
+
+    private static func decodePayload(_ bytes: UnsafeRawBufferPointer,
+                                      reportProgress: @Sendable (String) -> Void) throws -> ScanSnapshot {
+        var reader = BinaryReader(data: bytes)
         guard try reader.readBytes(count: signature.count) == signature else { throw SnapshotFormatError.invalidSignature }
         let version = Int(try reader.readUInt32())
         guard (2...ScanSnapshot.currentVersion).contains(version) else { throw SnapshotFormatError.unsupportedVersion }
@@ -408,7 +417,7 @@ private struct BinaryWriter {
 }
 
 private struct BinaryReader {
-    let data: Data
+    let data: UnsafeRawBufferPointer
     var offset = 0
     var isAtEnd: Bool { offset == data.count }
     var remainingCount: Int { data.count - offset }
@@ -434,7 +443,7 @@ private struct BinaryReader {
     mutating func readBytes(count: Int) throws -> [UInt8] {
         try Task.checkCancellation()
         guard count >= 0, offset <= data.count, count <= data.count - offset else { throw SnapshotFormatError.truncated }
-        let result = Array(data[(data.startIndex + offset)..<(data.startIndex + offset + count)])
+        let result = Array(data[offset..<(offset + count)])
         offset += count
         return result
     }
@@ -443,9 +452,7 @@ private struct BinaryReader {
         if offset & 0xffff == 0 { try Task.checkCancellation() }
         let size = MemoryLayout<T>.size
         guard offset <= data.count, size <= data.count - offset else { throw SnapshotFormatError.truncated }
-        let value = data.withUnsafeBytes { raw in
-            raw.loadUnaligned(fromByteOffset: offset, as: T.self)
-        }
+        let value = data.loadUnaligned(fromByteOffset: offset, as: T.self)
         offset += size
         return T(littleEndian: value)
     }

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import SpaceTree
@@ -85,4 +86,23 @@ private func streamingFixture(count: Int = 4) throws -> ScanSnapshot {
     var members = original.hardLinkMembers
     members[1] = members[0]
     #expect(throws: ScanTreeValidationError.self) { try changed(nodes: original.nodes, members: members).validate() }
+}
+
+@Test func snapshotPayloadBoundsExcludeChecksum() throws {
+    let encoded = try SnapshotStore.encode(streamingFixture())
+    func signed(_ payload: Data) -> Data {
+        var result = payload
+        result.append(contentsOf: SHA256.hash(data: payload))
+        return result
+    }
+    let payload = Data(encoded.dropLast(32))
+    #expect(throws: SnapshotFormatError.truncated) {
+        try SnapshotStore.decode(signed(Data(payload.dropLast())))
+    }
+    var extra = payload
+    extra.append(0)
+    #expect(throws: SnapshotFormatError.trailingBytes) { try SnapshotStore.decode(signed(extra)) }
+    var corrupt = encoded
+    corrupt[20] ^= 1
+    #expect(throws: SnapshotFormatError.invalidChecksum) { try SnapshotStore.decode(corrupt) }
 }

@@ -102,3 +102,36 @@ The existing saved scan is never overwritten.
 For a fresh read-only filesystem scan, set `SPACETREE_MEMORY_SCAN` to a directory
 and select `optionalScanMemoryBenchmark`. This reports finishing-stage peaks and
 the returned tree's storage/heap use without saving a snapshot.
+
+## Snapshot load regression
+
+`SnapshotStore.decode` borrows the payload with `withUnsafeBytes` for the full
+parse. The reader's raw buffer excludes the SHA-256 trailer; returned arrays own
+their storage after that borrow ends. Checksumming remains chunked and cancellable.
+
+Run the synthetic peak-RSS check in two separate release test processes (fixture
+creation must not contribute to the loader's high-water mark):
+
+```sh
+export TMPDIR=/tmp
+export SWIFT_MODULECACHE_PATH=/tmp/spacetree-load-swift
+export CLANG_MODULE_CACHE_PATH=/tmp/spacetree-load-clang
+export SPACETREE_LOAD_REGRESSION=/tmp/spacetree-load-regression.spacetree
+SPACETREE_LOAD_PREPARE=1 swift test -c release --disable-sandbox --scratch-path /tmp/spacetree-load-release --filter snapshotLoadPeakMemoryRegression
+swift test -c release --disable-sandbox --scratch-path /tmp/spacetree-load-release --filter snapshotLoadPeakMemoryRegression
+```
+
+The fixture contains 131,073 nodes and over 128 MiB of names. The load check
+forces mapping and permits peak RSS growth of one mapped input plus final tree
+storage plus 32 MiB of runtime/validation overhead. A heap check at the validation stage also limits live
+allocations to one payload-sized tree plus 32 MiB. This catches a full payload
+copy even when macOS shares physical pages and RSS does not increase. Run only this test in the measurement process;
+other tests can contaminate process-wide peak RSS. Normal tests also cover
+nonzero-index slices, checksum errors, and correctly checksummed truncated or
+trailing payloads.
+
+Validation on this checkout: all 72 debug tests passed. The isolated release
+load measured 273.3 MiB peak RSS growth (305.0 MiB budget) and 136.8 MiB heap
+growth (168.3 MiB budget). A temporary full-input allocation control failed
+the heap check at 273.1 MiB despite similar RSS; the control was removed and
+the final release benchmark passed.
