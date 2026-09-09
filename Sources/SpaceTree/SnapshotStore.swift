@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Darwin
 
 struct ScanSnapshot: Sendable {
     static let currentVersion = 4
@@ -30,49 +31,83 @@ enum SnapshotStore {
     private static let maximumNodes = 100_000_000
     private static let maximumNameBytes = 2_000_000_000
 
-    static func load(targetID: String) async -> ScanSnapshot? {
-        await Task.detached(priority: .utility) {
-            let url = snapshotURL(for: targetID)
-            guard let data = try? Data(contentsOf: url),
-                  let snapshot = try? decode(data),
+    // These synchronous actor operations cannot interleave at an await: only one
+    // snapshot's decode/validation or serialization working set is active at once.
+    private actor IO {
+        func load(targetID: String, progress: @Sendable (String) -> Void) -> ScanSnapshot? {
+            autoreleasepool {
+                guard !Task.isCancelled else { return nil }
+                progress("Opening previous scan…")
+                guard let data = try? Data(contentsOf: SnapshotStore.snapshotURL(for: targetID), options: .mappedIfSafe),
+                      let snapshot = try? SnapshotStore.decode(data, progress: progress),
+                      snapshot.targetID == targetID else { return nil }
+                return snapshot
+            }
+        }
 
-                  snapshot.targetID == targetID else { return nil }
-            return snapshot
-        }.value
+        func save(_ snapshot: ScanSnapshot) {
+            do {
+                try FileManager.default.createDirectory(at: SnapshotStore.snapshotsDirectory(), withIntermediateDirectories: true)
+                try SnapshotStore.write(snapshot, to: SnapshotStore.snapshotURL(for: snapshot.targetID))
+            } catch {
+                // Cache failures must never turn a successful scan into a failure.
+            }
+        }
     }
 
-    static func save(_ snapshot: ScanSnapshot) async {
-        await Task.detached(priority: .utility) {
-            do {
-                let directory = snapshotsDirectory()
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                try encode(snapshot).write(to: snapshotURL(for: snapshot.targetID), options: .atomic)
-            } catch {
-                // A cache failure must never turn a successful filesystem scan into a failure.
-            }
-        }.value
+    private static let io = IO()
+
+    static func load(targetID: String, progress: @Sendable (String) -> Void = { _ in }) async -> ScanSnapshot? {
+        await io.load(targetID: targetID, progress: progress)
+    }
+    static func save(_ snapshot: ScanSnapshot) async { await io.save(snapshot) }
+
+    // Write beside the destination and rename only after the complete checksummed
+    // stream has reached disk. Failure leaves the previous cache intact.
+    static func write(_ snapshot: ScanSnapshot, to url: URL) throws {
+        let temporary = url.deletingLastPathComponent().appendingPathComponent(".spacetree-\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer {
+            try? file.close()
+            try? FileManager.default.removeItem(at: temporary)
+        }
+        var writer = BinaryWriter(file: file)
+        try encode(snapshot, into: &writer)
+        try writer.finish()
+        try file.synchronize()
+        guard rename(temporary.path, url.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     static func encode(_ snapshot: ScanSnapshot) throws -> Data {
-        guard snapshot.version == ScanSnapshot.currentVersion else { throw SnapshotFormatError.unsupportedVersion }
         var writer = BinaryWriter()
-        writer.append(bytes: signature)
-        writer.append(UInt32(snapshot.version))
+        try encode(snapshot, into: &writer)
+        try writer.finish()
+        return writer.data
+    }
+
+    private static func encode(_ snapshot: ScanSnapshot, into writer: inout BinaryWriter) throws {
+        guard snapshot.version == ScanSnapshot.currentVersion else { throw SnapshotFormatError.unsupportedVersion }
+        try writer.append(bytes: signature)
+        try writer.append(UInt32(snapshot.version))
         try writer.append(string: snapshot.targetID)
-        writer.append(snapshot.scannedAt.timeIntervalSince1970.bitPattern)
-        writer.append(snapshot.scanDuration.bitPattern)
-        writer.append(snapshot.fseventID)
+        try writer.append(snapshot.scannedAt.timeIntervalSince1970.bitPattern)
+        try writer.append(snapshot.scanDuration.bitPattern)
+        try writer.append(snapshot.fseventID)
         try writer.append(string: snapshot.progress.currentPath)
-        writer.append(Int64(snapshot.progress.itemCount))
-        writer.append(snapshot.progress.bytesFound)
-        writer.append(Int64(snapshot.progress.unreadableCount))
-        writer.append(Int64(snapshot.progress.duplicateReferenceCount))
+        try writer.append(Int64(snapshot.progress.itemCount))
+        try writer.append(snapshot.progress.bytesFound)
+        try writer.append(Int64(snapshot.progress.unreadableCount))
+        try writer.append(Int64(snapshot.progress.duplicateReferenceCount))
 
         let tree = snapshot.tree
         try writer.append(string: tree.generation.rawValue.uuidString)
-        writer.append(tree.rootID.rawValue)
+        try writer.append(tree.rootID.rawValue)
         try writer.append(string: tree.displayURL.absoluteString)
-        writer.append(Int64(tree.unreadableCount))
+        try writer.append(Int64(tree.unreadableCount))
         try writer.append(count: tree.nodes.count)
         try writer.append(count: tree.nameBytes.count)
         try writer.append(count: tree.roots.count)
@@ -80,64 +115,70 @@ enum SnapshotStore {
         try writer.append(count: tree.hardLinkMembers.count)
 
         for node in tree.nodes {
-            writer.append(node.allocatedBytes)
-            writer.append(node.logicalBytes)
-            writer.append(node.modifiedNanoseconds)
-            writer.append(node.parent.rawValue)
-            writer.append(node.firstChild.rawValue)
-            writer.append(node.nextSibling.rawValue)
-            writer.append(node.nameOffset)
-            writer.append(node.recursiveFileCount)
-            writer.append(node.recursiveDirectoryCount)
-            writer.append(node.duplicateReferenceCount)
-            writer.append(node.hardLinkGroup)
-            writer.append(node.nameLength)
-            writer.append(node.flags.rawValue)
+            try writer.append(node.allocatedBytes)
+            try writer.append(node.logicalBytes)
+            try writer.append(node.modifiedNanoseconds)
+            try writer.append(node.parent.rawValue)
+            try writer.append(node.firstChild.rawValue)
+            try writer.append(node.nextSibling.rawValue)
+            try writer.append(node.nameOffset)
+            try writer.append(node.recursiveFileCount)
+            try writer.append(node.recursiveDirectoryCount)
+            try writer.append(node.duplicateReferenceCount)
+            try writer.append(node.hardLinkGroup)
+            try writer.append(node.nameLength)
+            try writer.append(node.flags.rawValue)
         }
-        writer.append(bytes: tree.nameBytes)
+        try writer.append(bytes: tree.nameBytes)
         for root in tree.roots {
-            writer.append(root.nodeID.rawValue)
+            try writer.append(root.nodeID.rawValue)
             try writer.append(string: root.url.absoluteString)
         }
         for group in tree.hardLinkGroups {
-            writer.append(group.deviceID)
-            writer.append(group.fileID)
-            writer.append(group.allocatedBytes)
-            writer.append(group.logicalBytes)
-            writer.append(group.canonicalMember.rawValue)
-            writer.append(group.memberStart)
-            writer.append(group.memberCount)
+            try writer.append(group.deviceID)
+            try writer.append(group.fileID)
+            try writer.append(group.allocatedBytes)
+            try writer.append(group.logicalBytes)
+            try writer.append(group.canonicalMember.rawValue)
+            try writer.append(group.memberStart)
+            try writer.append(group.memberCount)
         }
-        for member in tree.hardLinkMembers { writer.append(member.rawValue) }
+        for member in tree.hardLinkMembers { try writer.append(member.rawValue) }
 
         try writer.append(count: tree.clones.count)
         for id in tree.clones.keys.sorted() {
             let clone = tree.clones[id]!
-            writer.append(id.rawValue)
-            writer.append(clone.deviceID)
-            writer.append(clone.fileID)
-            writer.append(clone.cloneID)
-            writer.append(clone.flags)
-            writer.append(clone.referenceCount ?? 0)
-            writer.append(UInt32(clone.referenceCount == nil ? 0 : 1))
+            try writer.append(id.rawValue)
+            try writer.append(clone.deviceID)
+            try writer.append(clone.fileID)
+            try writer.append(clone.cloneID)
+            try writer.append(clone.flags)
+            try writer.append(clone.referenceCount ?? 0)
+            try writer.append(UInt32(clone.referenceCount == nil ? 0 : 1))
         }
 
         let statisticsData = try JSONEncoder().encode(snapshot.statistics)
         try writer.append(count: statisticsData.count)
-        writer.append(bytes: Array(statisticsData))
-        let checksum = SHA256.hash(data: writer.data)
-        writer.data.append(contentsOf: checksum)
-        return writer.data
+        try writer.append(bytes: Array(statisticsData))
     }
 
-    static func decode(_ data: Data) throws -> ScanSnapshot {
+    static func decode(_ data: Data, progress reportProgress: @Sendable (String) -> Void = { _ in }) throws -> ScanSnapshot {
+        try Task.checkCancellation()
+        reportProgress("Verifying previous scan…")
         guard data.count >= signature.count + checksumSize else { throw SnapshotFormatError.truncated }
         let payloadEnd = data.count - checksumSize
         let payload = data.prefix(payloadEnd)
         let expected = data.suffix(checksumSize)
-        guard Data(SHA256.hash(data: payload)) == expected else { throw SnapshotFormatError.invalidChecksum }
+        var hash = SHA256()
+        for offset in stride(from: 0, to: payload.count, by: 1_048_576) {
+            try Task.checkCancellation()
+            let start = payload.startIndex + offset
+            hash.update(data: payload[start..<min(payload.endIndex, start + 1_048_576)])
+        }
+        guard Data(hash.finalize()) == expected else { throw SnapshotFormatError.invalidChecksum }
+        reportProgress("Loading previous scan…")
 
-        var reader = BinaryReader(data: Data(payload))
+        var reader = BinaryReader(data: payload)
         guard try reader.readBytes(count: signature.count) == signature else { throw SnapshotFormatError.invalidSignature }
         let version = Int(try reader.readUInt32())
         guard (2...ScanSnapshot.currentVersion).contains(version) else { throw SnapshotFormatError.unsupportedVersion }
@@ -264,7 +305,10 @@ enum SnapshotStore {
             unreadableCount: unreadableCount,
             clones: clones
         )
+        try Task.checkCancellation()
+        reportProgress("Validating previous scan…")
         try tree.validate()
+        try Task.checkCancellation()
         return ScanSnapshot(
             version: ScanSnapshot.currentVersion,
             targetID: targetID,
@@ -302,26 +346,64 @@ enum SnapshotStore {
 }
 
 private struct BinaryWriter {
+    private static let bufferSize = 1_048_576
     var data = Data()
+    private let file: FileHandle?
+    private var hash = SHA256()
 
-    mutating func append<T: FixedWidthInteger>(_ value: T) {
-        var littleEndian = value.littleEndian
-        Swift.withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    init(file: FileHandle? = nil) {
+        self.file = file
+        if file != nil { data.reserveCapacity(Self.bufferSize) }
     }
 
-    mutating func append(bytes: [UInt8]) {
-        data.append(contentsOf: bytes)
+    mutating func append<T: FixedWidthInteger>(_ value: T) throws {
+        if file != nil, data.count + MemoryLayout<T>.size > Self.bufferSize { try flush() }
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+        try flushIfNeeded()
+    }
+
+    mutating func append(bytes: [UInt8]) throws {
+        guard file != nil else { data.append(contentsOf: bytes); return }
+        var offset = 0
+        while offset < bytes.count {
+            let end = min(bytes.count, offset + Self.bufferSize - data.count)
+            data.append(contentsOf: bytes[offset..<end])
+            offset = end
+            try flushIfNeeded()
+        }
     }
 
     mutating func append(string: String) throws {
         let bytes = Array(string.utf8)
         try append(count: bytes.count)
-        append(bytes: bytes)
+        try append(bytes: bytes)
     }
 
     mutating func append(count: Int) throws {
         guard count >= 0, count <= Int(UInt32.max) else { throw SnapshotFormatError.invalidValue }
-        append(UInt32(count))
+        try append(UInt32(count))
+    }
+
+    private mutating func flushIfNeeded() throws {
+        if file != nil, data.count >= Self.bufferSize { try flush() }
+    }
+
+    private mutating func flush() throws {
+        guard let file, !data.isEmpty else { return }
+        hash.update(data: data)
+        try file.write(contentsOf: data)
+        data.removeAll(keepingCapacity: true)
+    }
+
+    mutating func finish() throws {
+        if let file {
+            try flush()
+            try file.write(contentsOf: Data(hash.finalize()))
+        } else {
+            let checksum = SHA256.hash(data: data)
+            data.append(contentsOf: checksum)
+        }
     }
 }
 
@@ -350,13 +432,15 @@ private struct BinaryReader {
     }
 
     mutating func readBytes(count: Int) throws -> [UInt8] {
+        try Task.checkCancellation()
         guard count >= 0, offset <= data.count, count <= data.count - offset else { throw SnapshotFormatError.truncated }
-        let result = Array(data[offset..<(offset + count)])
+        let result = Array(data[(data.startIndex + offset)..<(data.startIndex + offset + count)])
         offset += count
         return result
     }
 
     private mutating func readInteger<T: FixedWidthInteger>() throws -> T {
+        if offset & 0xffff == 0 { try Task.checkCancellation() }
         let size = MemoryLayout<T>.size
         guard offset <= data.count, size <= data.count - offset else { throw SnapshotFormatError.truncated }
         let value = data.withUnsafeBytes { raw in

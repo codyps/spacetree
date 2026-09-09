@@ -1,5 +1,7 @@
 # Memory usage investigation — 2026-09-07
 
+> Follow-up: the snapshot input, validation, and save-buffer fixes were implemented and measured on 2026-09-09. See [the updated profile](memory-profile-2026-09-09.md). The observations below describe the earlier code and datasets.
+
 ## Live evidence
 
 Inspected running SpaceTree PID 34174 at approximately 15:51 EDT using `vmmap

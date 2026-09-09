@@ -14,6 +14,7 @@ final class ScanTarget: Identifiable {
 
     enum State: Equatable {
         case idle
+        case restoring
         case scanning
         case complete
         case failed(String)
@@ -32,6 +33,7 @@ final class ScanTarget: Identifiable {
     var isAuxiliary: Bool
     let persistResults: Bool
     var state: State = .idle
+    var restorationStage = "Checking for previous scan…"
     var progress: ScanProgress
     var tree: ScanTree? {
         didSet {
@@ -235,7 +237,7 @@ final class ScanTarget: Identifiable {
     }
 
     func cancel() {
-        guard state == .scanning else { return }
+        guard state == .scanning || state == .restoring else { return }
         endStatistics(outcome: "cancelled")
         generation = UUID()
         task?.cancel()
@@ -266,12 +268,29 @@ final class ScanTarget: Identifiable {
         scan()
     }
 
-    func restoreSnapshot() {
-        guard persistResults else { return }
+    func restoreSnapshot(
+        load: @escaping @Sendable (String, @escaping @Sendable (String) -> Void) async -> ScanSnapshot? = {
+            await SnapshotStore.load(targetID: $0, progress: $1)
+        }
+    ) {
+        guard persistResults, state == .idle, tree == nil else { return }
         let expectedGeneration = generation
-        Task { [weak self] in
-            guard let self, let snapshot = await SnapshotStore.load(targetID: id) else { return }
-            guard generation == expectedGeneration, state == .idle, tree == nil else { return }
+        restorationStage = "Checking for previous scan…"
+        state = .restoring
+        task = Task { [weak self] in
+            guard let self else { return }
+            let snapshot = await load(id) { [weak self] stage in
+                Task { @MainActor [weak self] in
+                    guard let self, generation == expectedGeneration, state == .restoring else { return }
+                    restorationStage = stage
+                }
+            }
+            guard !Task.isCancelled, generation == expectedGeneration, state == .restoring else { return }
+            task = nil
+            guard let snapshot else {
+                state = .idle
+                return
+            }
             tree = snapshot.tree
             currentID = snapshot.tree.rootID
             progress = snapshot.progress

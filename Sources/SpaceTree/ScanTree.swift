@@ -421,7 +421,9 @@ struct ScanTree: Codable, Equatable, Sendable {
     }
 
     func validate() throws {
+        try Task.checkCancellation()
         for (id, clone) in clones {
+            try Task.checkCancellation()
             guard isValid(id), kind(of: id) == .file, clone.cloneID != 0,
                   clone.flags & 0x41 != 0 else { throw ScanTreeValidationError.invalidKind(id) }
         }
@@ -429,6 +431,7 @@ struct ScanTree: Codable, Equatable, Sendable {
         guard nodes[index(of: rootID)].parent == .null else { throw ScanTreeValidationError.invalidRoot(rootID) }
         var describedRoots = Set<NodeID>()
         for root in roots {
+            try Task.checkCancellation()
             guard isValid(root.nodeID),
                   describedRoots.insert(root.nodeID).inserted,
                   root.url.isFileURL,
@@ -436,13 +439,14 @@ struct ScanTree: Codable, Equatable, Sendable {
                 throw ScanTreeValidationError.invalidRoot(root.nodeID)
             }
         }
-        var visited = Set<NodeID>()
-        var active = Set<NodeID>()
+        var visited = NodeMembership(nodeCount: nodes.count)
 
         func visit(_ nodeID: NodeID) throws -> (UInt64, UInt64, UInt32, UInt32, UInt32) {
+            try Task.checkCancellation()
             guard isValid(nodeID) else { throw ScanTreeValidationError.invalidLink(nodeID, "node") }
-            guard active.insert(nodeID).inserted else { throw ScanTreeValidationError.cycle(nodeID) }
-            guard visited.insert(nodeID).inserted else { throw ScanTreeValidationError.cycle(nodeID) }
+            // Seeing a node twice catches both ancestry and sibling cycles, as
+            // well as repeated ownership; separate active/sibling sets are redundant.
+            guard visited.insert(nodeID) else { throw ScanTreeValidationError.cycle(nodeID) }
             let record = nodes[index(of: nodeID)]
             let knownFlags = NodeFlags.kindMask.rawValue
                 | NodeFlags.unreadable.rawValue
@@ -468,11 +472,9 @@ struct ScanTree: Codable, Equatable, Sendable {
             var files: UInt32 = isDirectory ? 0 : 1
             var directories: UInt32 = isDirectory ? 1 : 0
             var duplicates: UInt32 = record.flags.contains(.duplicateReference) ? 1 : 0
-            var siblingSeen = Set<NodeID>()
             var child = record.firstChild
             while child != .null {
                 guard isValid(child) else { throw ScanTreeValidationError.invalidLink(nodeID, "child") }
-                guard siblingSeen.insert(child).inserted else { throw ScanTreeValidationError.cycle(child) }
                 guard nodes[index(of: child)].parent == nodeID else {
                     throw ScanTreeValidationError.invalidParent(child: child, expected: nodeID)
                 }
@@ -484,7 +486,6 @@ struct ScanTree: Codable, Equatable, Sendable {
                 duplicates = duplicates.addingReportingOverflow(values.4).overflow ? .max : duplicates + values.4
                 child = nodes[index(of: child)].nextSibling
             }
-            active.remove(nodeID)
             if isDirectory {
                 guard record.allocatedBytes == allocated,
                       record.logicalBytes == logical,
@@ -503,14 +504,16 @@ struct ScanTree: Codable, Equatable, Sendable {
 
         _ = try visit(rootID)
         for raw in nodes.indices {
+            try Task.checkCancellation()
             let nodeID = NodeID(rawValue: UInt32(raw))
             if !nodes[raw].flags.contains(.tombstone), !visited.contains(nodeID) {
                 throw ScanTreeValidationError.unreachable(nodeID)
             }
         }
 
-        var groupedMembers = Set<NodeID>()
+        var groupedMembers = NodeMembership(nodeCount: nodes.count)
         for (index, group) in hardLinkGroups.enumerated() {
+            try Task.checkCancellation()
             let start = Int(group.memberStart)
             let end = start + Int(group.memberCount)
             guard group.memberCount >= 2,
@@ -519,8 +522,9 @@ struct ScanTree: Codable, Equatable, Sendable {
                 throw ScanTreeValidationError.invalidHardLinkGroup(UInt32(index))
             }
             for member in hardLinkMembers[start..<end] {
+                try Task.checkCancellation()
                 guard isValid(member),
-                      groupedMembers.insert(member).inserted,
+                      groupedMembers.insert(member),
                       nodes[self.index(of: member)].hardLinkGroup == UInt32(index),
                       kind(of: member) == .file,
                       nodes[self.index(of: member)].flags.contains(.duplicateReference) == (member != group.canonicalMember) else {
@@ -532,6 +536,7 @@ struct ScanTree: Codable, Equatable, Sendable {
             throw ScanTreeValidationError.invalidHardLinkGroup(UInt32(hardLinkGroups.count))
         }
         for (raw, node) in nodes.enumerated() where node.hardLinkGroup != .max {
+            try Task.checkCancellation()
             guard Int(node.hardLinkGroup) < hardLinkGroups.count,
                   groupedMembers.contains(NodeID(rawValue: UInt32(raw))) else {
                 throw ScanTreeValidationError.invalidHardLinkGroup(node.hardLinkGroup)
@@ -863,5 +868,27 @@ private func clampedInt64(_ value: UInt64) -> Int64 {
 extension Int64 {
     var formattedByteCount: String {
         ByteCountFormatter.string(fromByteCount: self, countStyle: .file)
+    }
+}
+
+// Dense node IDs need one bit per node, not an O(n) hash table. Callers validate
+// IDs before indexing; membership remains distinct for traversal and hard links.
+private struct NodeMembership {
+    private var words: [UInt64]
+    private(set) var count = 0
+
+    init(nodeCount: Int) { words = Array(repeating: 0, count: (nodeCount + 63) / 64) }
+
+    func contains(_ id: NodeID) -> Bool {
+        words[Int(id.rawValue) / 64] & (UInt64(1) << (id.rawValue & 63)) != 0
+    }
+
+    mutating func insert(_ id: NodeID) -> Bool {
+        let index = Int(id.rawValue) / 64
+        let mask = UInt64(1) << (id.rawValue & 63)
+        guard words[index] & mask == 0 else { return false }
+        words[index] |= mask
+        count += 1
+        return true
     }
 }

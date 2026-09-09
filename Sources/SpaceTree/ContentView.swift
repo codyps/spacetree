@@ -197,6 +197,21 @@ private struct ScanTargetCard: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(!target.isAvailable)
             }
+        case .restoring:
+            VStack(alignment: .trailing, spacing: 5) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Restoring previous scan")
+                    Button("Scan", action: target.scan)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!target.isAvailable)
+                }
+                Text(target.restorationStage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 330, height: 16, alignment: .trailing)
+            }
         case .scanning:
             VStack(alignment: .trailing, spacing: 5) {
                 HStack(spacing: 8) {
