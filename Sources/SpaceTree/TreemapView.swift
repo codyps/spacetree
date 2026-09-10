@@ -167,11 +167,14 @@ private struct TreemapBaseLayer: View, Equatable {
                 }
             }
             for folder in scene.labeledFolders {
+                context.stroke(Path(folder.rect.insetBy(dx: 0.5, dy: 0.5)),
+                               with: .color(.white.opacity(0.3)), lineWidth: 1)
                 guard let header = folder.header else { continue }
                 context.fill(Path(header), with: .linearGradient(Gradient(colors: [.white.opacity(0.24), .white.opacity(0.08)]), startPoint: header.origin, endPoint: CGPoint(x: header.minX, y: header.maxY)))
+                guard folder.showsName else { continue }
                 var clipped = context
-                clipped.clip(to: Path(header.insetBy(dx: 4, dy: 0)))
-                clipped.draw(Text(scene.tree.name(of: folder.nodeID)).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white), at: CGPoint(x: header.minX + 5, y: header.midY), anchor: .leading)
+                clipped.clip(to: Path(header.insetBy(dx: 2, dy: 0)))
+                clipped.draw(Text(scene.tree.name(of: folder.nodeID)).font(.system(size: 9, weight: .semibold)).foregroundStyle(.white), at: CGPoint(x: header.minX + 3, y: header.midY), anchor: .leading)
             }
             for tileIndex in scene.labeledTileIndices {
                 let tile = scene.tiles[tileIndex]
@@ -179,7 +182,7 @@ private struct TreemapBaseLayer: View, Equatable {
                 let gap: CGFloat = tile.rect.width > 2 && tile.rect.height > 2 ? 0.5 : 0
                 let rect = tile.labelRect.insetBy(dx: gap, dy: gap)
                 let label = Text(scene.label(for: entry))
-                    .font(.system(size: entry.isAggregate ? 10 : 11, weight: .semibold))
+                    .font(.system(size: entry.isAggregate ? 8 : 9, weight: .semibold))
                     .foregroundStyle(.white)
                 context.draw(label, in: rect.insetBy(dx: 5, dy: 4))
             }

@@ -89,7 +89,7 @@ enum TreemapLayout {
         result: inout [CGRect]
     ) {
         if available.width >= available.height {
-            let stripWidth = totalArea / Double(available.height)
+            let stripWidth = min(Double(available.width), totalArea / Double(available.height))
             var y = Double(available.minY)
             for (index, pair) in row.enumerated() {
                 let height = index == row.count - 1 ? Double(available.maxY) - y : pair.1 / stripWidth
@@ -99,7 +99,7 @@ enum TreemapLayout {
             available.origin.x += stripWidth
             available.size.width = max(0, available.width - stripWidth)
         } else {
-            let stripHeight = totalArea / Double(available.width)
+            let stripHeight = min(Double(available.height), totalArea / Double(available.width))
             var x = Double(available.minX)
             for (index, pair) in row.enumerated() {
                 let width = index == row.count - 1 ? Double(available.maxX) - x : pair.1 / stripHeight
@@ -147,6 +147,7 @@ struct TreemapScene: Sendable {
         let nodeID: NodeID
         let rect: CGRect
         let header: CGRect?
+        var showsName: Bool { (header?.height ?? 0) >= 14 }
     }
     let folders: [Folder]
     var labeledFolders: [Folder] { folders }
@@ -200,13 +201,15 @@ struct TreemapScene: Sendable {
             if !region.entry.isAggregate, isDirectory,
                region.rect.width * scale >= 4, region.rect.height * scale >= 4,
                region.budget > 1 {
-                let header = region.rect.width >= 48 && region.rect.height >= 40
-                    ? CGRect(x: region.rect.minX, y: region.rect.minY, width: region.rect.width, height: 20) : nil
+                let headerHeight: CGFloat = region.rect.width >= 32 && region.rect.height >= 28
+                    ? 14 : min(2, region.rect.height / 4)
+                let header = CGRect(x: region.rect.minX, y: region.rect.minY,
+                                    width: region.rect.width, height: headerHeight)
                 // Retain ancestors for highlighting, but never a second rectangle dictionary.
                 folderLookup[region.entry.nodeID] = folders.count
                 folders.append(Folder(nodeID: region.entry.nodeID, rect: region.rect, header: header))
-                let content = CGRect(x: region.rect.minX, y: region.rect.minY + (header?.height ?? 0),
-                                     width: region.rect.width, height: region.rect.height - (header?.height ?? 0))
+                let content = CGRect(x: region.rect.minX, y: region.rect.minY + headerHeight,
+                                     width: region.rect.width, height: region.rect.height - headerHeight)
                 let children = try arrangedNodes(tree: tree, nodes: tree.childIDs(of: region.entry.nodeID),
                                                  owner: region.entry.nodeID, in: content, scale: scale,
                                                  limit: region.budget - 1)
