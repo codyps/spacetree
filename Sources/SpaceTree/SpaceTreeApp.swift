@@ -4,7 +4,10 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
-        if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+        // Packaged apps keep resources in Contents/Resources, while SwiftPM's
+        // generated accessor otherwise falls back to an absolute build path.
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "png")
+            ?? Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
            let icon = NSImage(contentsOf: iconURL) {
             NSApplication.shared.applicationIconImage = icon
         }

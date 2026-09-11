@@ -39,6 +39,78 @@ swift build -c release
 .build/release/SpaceTree
 ```
 
+## Download or build a DMG
+
+The **macOS build** GitHub Actions workflow runs on pushes, pull requests, and
+manual dispatch. It tests on Apple Silicon and Intel, then builds a universal
+`SpaceTree.app` for macOS 14 or newer. Download the **SpaceTree-universal-dmg**
+artifact from a successful workflow run, unzip it, open the DMG, and drag
+SpaceTree to Applications. Artifacts include a SHA-256 checksum and are retained
+for 14 days. Stable installers are published separately through the release-PR
+flow described below.
+
+Build the same installer locally with Xcode's command-line tools:
+
+```sh
+scripts/build-dmg.sh
+# Optional version/build overrides:
+VERSION=0.1.0 BUILD_NUMBER=2 scripts/build-dmg.sh
+```
+
+The installer is written to `dist/SpaceTree-<version>-universal.dmg`, using
+`version.txt` unless `VERSION` is supplied.
+`SPACETREE_BUILD_ROOT` and `SPACETREE_OUTPUT_DIR` can override the build and output
+directories. The script builds both architectures, packages the icon and app
+metadata, signs the app ad hoc, creates a compressed DMG, and mounts it read-only
+to verify the packaged signature, architectures, resources, and Applications link.
+
+These builds are **ad-hoc signed, not Developer ID signed or notarized**. macOS
+Gatekeeper may block downloaded builds on first launch. No signing credentials
+are required by this workflow; trusted public distribution would need Developer ID
+signing and notarization added separately. Generated installers and backup reports
+remain excluded from Git.
+
+### Stable releases
+
+The **Release** workflow uses [Release Please](https://github.com/googleapis/release-please)
+to maintain a release PR against `main`. Its `simple` strategy updates `version.txt`,
+`.release-please-manifest.json`, and `CHANGELOG.md`. Commit messages (or squash-merge
+PR titles) determine the next version:
+
+- `fix: ...` produces a patch bump.
+- `feat: ...` produces a minor bump.
+- `feat!: ...` or a `BREAKING CHANGE:` footer produces a major bump after 1.0;
+  while the app is below 1.0, breaking changes produce a minor bump.
+- Documentation and maintenance commits normally wait for the next feature/fix
+  release; they do not independently trigger one.
+
+The initial version is configured as `0.1.0`, with history bootstrapped after
+`bfa675a`. Use conventional commit messages for new work; earlier free-form
+commit messages are not retroactively classified.
+
+1. Merge development changes into `main`. The bot creates or refreshes one release PR.
+2. CI is explicitly dispatched for that PR's branch, because PRs created with
+   `GITHUB_TOKEN` do not automatically trigger the normal PR workflow.
+3. Review the proposed version/changelog and merge the release PR.
+4. Release Please creates a version tag and a **draft** GitHub Release. The same
+   workflow tests and builds that exact tagged commit using the reusable macOS workflow.
+5. Only after the DMG passes verification are it and its checksum uploaded and the
+   draft published as the latest release. No additional tag-triggered workflow is needed.
+
+`version.txt`, the manifest version, and the release tag must match. Release builds
+are pinned to the tag's resolved commit, even if `main` advances while they run.
+Publication rechecks that the tag has not moved. Failed builds leave a draft;
+use **Actions → Release → Run workflow** on `main` with `retry_tag` set to that
+draft's tag (for example, `v0.2.0`) to retry. This rebuilds and tests the same commit;
+it does not overwrite an already published release. If that commit contains a
+build bug, fix it through another release PR instead of moving the old tag.
+
+Repository setup requires **Settings → Actions → General → Workflow permissions →
+Allow GitHub Actions to create and approve pull requests**. The default token can
+remain read-only: write permissions are scoped to release preparation/publication
+jobs. No PAT or extra secret is required, and the workflow never approves or merges
+its own PR. Publishing is restricted to the `main` release flow.
+
 The main dashboard lists APFS volumes and other mounted filesystems. Scan any item individually or use **Scan All** to run them concurrently. Scanning an entire startup disk can take a while because SpaceTree uses normal macOS filesystem APIs rather than a privileged filesystem index.
 
 ## macOS privacy permissions

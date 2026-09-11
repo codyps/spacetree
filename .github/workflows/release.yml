@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      retry_tag:
+        description: 'Existing draft release to retry, e.g. v0.2.0 (empty: update release PR)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Never cancel a release halfway through uploading its installer.
+concurrency:
+  group: spacetreerelease-main
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      actions: write
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
+      sha: ${{ steps.target.outputs.sha }}
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        if: inputs.retry_tag == ''
+        with:
+          target-branch: main
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+      # GITHUB_TOKEN-created PRs don't trigger pull_request CI. Explicit dispatch
+      # does, and the normal macOS workflow validates the bot branch read-only.
+      - name: Run CI on the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_PRS: ${{ steps.release.outputs.prs }}
+        run: |
+          jq -er '.[] | select(.baseBranchName == "main") | .headBranchName' <<< "$RELEASE_PRS" |
+            while IFS= read -r branch; do
+              gh workflow run macos.yml --ref "$branch"
+            done
+      - name: Resolve draft release to an immutable commit
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RETRY_TAG: ${{ inputs.retry_tag }}
+          CREATED: ${{ steps.release.outputs.release_created }}
+          CREATED_TAG: ${{ steps.release.outputs.tag_name }}
+          CREATED_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          tag="$RETRY_TAG"
+          if [[ -z "$tag" ]]; then
+            [[ "$CREATED" == true ]] || exit 0
+            tag="$CREATED_TAG"
+          fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid release tag' >&2; exit 1; }
+          [[ $(gh release view "$tag" --json isDraft --jq .isDraft) == true ]] || {
+            echo 'Only draft releases may be built or retried.' >&2; exit 1;
+          }
+          sha=$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          if [[ -n "$CREATED_SHA" ]]; then
+            [[ "$sha" == "$CREATED_SHA" ]]
+          fi
+          # Reject an unrelated tag on a manual retry.
+          status=$(gh api "repos/$GH_REPO/compare/$sha...main" --jq .status)
+          [[ "$status" == ahead || "$status" == identical ]]
+          printf 'tag=%s\nsha=%s\n' "$tag" "$sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
+    uses: ./.github/workflows/macos.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      release_tag: ${{ needs.prepare.outputs.tag }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: SpaceTree-universal-dmg
+          path: dist
+      - name: Attach verified installer and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        working-directory: dist
+        run: |
+          [[ $(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha) == "$RELEASE_SHA" ]]
+          [[ $(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft) == true ]]
+          dmg="SpaceTree-${RELEASE_TAG#v}-universal.dmg"
+          test -s "$dmg"
+          test -s "$dmg.sha256"
+          sha256sum --check "$dmg.sha256"
+          gh release upload "$RELEASE_TAG" "$dmg" "$dmg.sha256" --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest
