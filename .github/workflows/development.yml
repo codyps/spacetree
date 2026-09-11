@@ -1,0 +1,55 @@
+name: Development
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Build every pushed commit. Only publication is serialized; older commits
+# check the current main head before changing the rolling release.
+concurrency:
+  group: development-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/macos.yml
+    with:
+      ref: ${{ github.sha }}
+      release_tag: ''
+      development: true
+    permissions:
+      contents: read
+
+  publish:
+    name: Update development release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: spacetreedevelopment-publication
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.build.outputs.sha }}
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: SpaceTree-universal-dmg
+          path: dist
+      - name: Publish rolling prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ needs.build.outputs.sha }}
+          BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DISPLAY_VERSION: ${{ needs.build.outputs.display_version }}
+        working-directory: dist
+        run: ../scripts/publish-development.sh

@@ -2,10 +2,20 @@ name: macOS build
 
 on:
   push:
+    branches-ignore: [main]
   pull_request:
   workflow_dispatch:
   workflow_call:
+    outputs:
+      display_version:
+        value: ${{ jobs.package.outputs.display_version }}
+      sha:
+        value: ${{ jobs.package.outputs.sha }}
     inputs:
+      development:
+        description: Include Git identity in the installer version
+        type: boolean
+        default: false
       ref:
         description: Exact commit to test and package
         required: true
@@ -19,11 +29,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  group: macos-${{ github.workflow }}-${{ inputs.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha) || github.ref }}
   cancel-in-progress: true
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
 
 jobs:
   test:
@@ -31,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-15-intel]
+        runner: [macos-26, macos-26-intel]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
@@ -44,7 +54,9 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: python3 scripts/check-version.py
       - name: Show toolchain
-        run: swift --version
+        run: |
+          xcodebuild -version
+          swift --version
       - name: Test Swift app
         run: swift test --configuration release
       - name: Test backup report tool
@@ -55,13 +67,32 @@ jobs:
   package:
     name: Universal DMG
     needs: test
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 25
+    outputs:
+      display_version: ${{ steps.version.outputs.display_version }}
+      sha: ${{ steps.version.outputs.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+      - name: Derive installer version
+        id: version
+        env:
+          DEVELOPMENT_BUILD: ${{ inputs.development }}
+        run: |
+          args=()
+          if [[ "$DEVELOPMENT_BUILD" == true ]]; then
+            args+=(--development)
+          fi
+          printf 'display_version=%s\n' "$(python3 scripts/build-version.py "${args[@]}")" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Verify release version
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -69,6 +100,7 @@ jobs:
       - name: Build and verify DMG
         env:
           BUILD_NUMBER: ${{ github.run_number }}
+          DISPLAY_VERSION: ${{ steps.version.outputs.display_version }}
         run: scripts/build-dmg.sh
       - name: Upload installer and checksum
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

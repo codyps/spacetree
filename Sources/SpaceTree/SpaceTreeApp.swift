@@ -34,6 +34,15 @@ struct SpaceTreeApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About SpaceTree") {
+                    var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+                    if let version = Bundle.main.object(forInfoDictionaryKey: "SpaceTreeDisplayVersion") as? String {
+                        options[.applicationVersion] = version
+                    }
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: options)
+                }
+            }
             CommandMenu("Go") {
                 Button("Back") { model.viewingTarget?.goBack() }
                     .keyboardShortcut("[", modifiers: .command)

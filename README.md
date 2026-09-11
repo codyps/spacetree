@@ -41,8 +41,10 @@ swift build -c release
 
 ## Download or build a DMG
 
-The **macOS build** GitHub Actions workflow runs on pushes, pull requests, and
-manual dispatch. It tests on Apple Silicon and Intel, then builds a universal
+The reusable **macOS build** GitHub Actions workflow checks pull requests,
+branch pushes, and manual builds. The **Development** workflow calls it for every
+push to `main`. It uses macOS 26 runners with Xcode 26.5 (Swift 6.3.2), matching
+the local development toolchain. It tests on Apple Silicon and Intel, then builds a universal
 `SpaceTree.app` for macOS 14 or newer. Download the **SpaceTree-universal-dmg**
 artifact from a successful workflow run, unzip it, open the DMG, and drag
 SpaceTree to Applications. Artifacts include a SHA-256 checksum and are retained
@@ -69,6 +71,37 @@ Gatekeeper may block downloaded builds on first launch. No signing credentials
 are required by this workflow; trusted public distribution would need Developer ID
 signing and notarization added separately. Generated installers and backup reports
 remain excluded from Git.
+
+### Development builds
+
+The rolling [Development release](https://github.com/codyps/spacetree/releases/tag/development)
+contains the latest published development DMG and checksum. Every push to `main`
+runs tests and builds an installer; successful builds update this single prerelease
+only if their commit is still the head of `main`. Publication is serialized so an
+older run cannot overwrite a newer build. Manual runs of **Development** on `main`
+can retry publication. PRs, other branches, and stable release builds cannot publish
+to this channel.
+
+Development versions look like `0.2.0-dev.14+gabc123def456`: the version from
+`version.txt`, the commit distance from the nearest reachable `vX.Y.Z` tag, and the
+Git hash. Before the first version tag, the distance is the total commit count.
+The moving `development` tag is ignored, full Git history is fetched, and builds
+on an exact version tag still include the hash. Local tracked changes add `.dirty`.
+
+The full version appears in the DMG filename and **About SpaceTree**, and is stored
+as `SpaceTreeDisplayVersion` in the app's Info.plist. Apple's numeric
+`CFBundleShortVersionString` and `CFBundleVersion` remain valid. Stable release
+filenames continue to use plain `X.Y.Z` versions.
+
+```sh
+DISPLAY_VERSION=$(python3 scripts/build-version.py --development) scripts/build-dmg.sh
+```
+
+CI uploads the new versioned assets before updating the rolling tag and release
+notes, then removes obsolete DMGs/checksums from that release. Unrelated assets
+are preserved. The prerelease is never marked as the latest stable release, and
+its notes link to the exact commit and CI run. Failed tests/builds leave the
+previous development release available.
 
 ### Stable releases
 

@@ -281,8 +281,8 @@ final class ScanTarget: Identifiable {
             guard let self else { return }
             let snapshot = await load(id) { [weak self] stage in
                 Task { @MainActor [weak self] in
-                    guard let self, generation == expectedGeneration, state == .restoring else { return }
-                    restorationStage = stage
+                    guard let self, self.generation == expectedGeneration, self.state == .restoring else { return }
+                    self.restorationStage = stage
                 }
             }
             guard !Task.isCancelled, generation == expectedGeneration, state == .restoring else { return }

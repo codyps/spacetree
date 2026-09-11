@@ -5,11 +5,16 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 version=${VERSION:-$(cat version.txt)}
+display_version=${DISPLAY_VERSION:-$version}
 build_number=${BUILD_NUMBER:-1}
 build_root=${SPACETREE_BUILD_ROOT:-"$repo_root/.build/dmg"}
 output_dir=${SPACETREE_OUTPUT_DIR:-"$repo_root/dist"}
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! "$build_number" =~ ^[0-9]+$ ]]; then
     echo 'VERSION must be X.Y.Z and BUILD_NUMBER must be numeric.' >&2
+    exit 1
+fi
+if [[ ! "$display_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+\+g[0-9a-f]{12,40}(\.dirty)?)?$ ]]; then
+    echo 'DISPLAY_VERSION must be X.Y.Z or X.Y.Z-dev.N+gHASH[.dirty].' >&2
     exit 1
 fi
 mkdir -p "$build_root" "$output_dir"
@@ -60,6 +65,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$build_number</string>
+    <key>SpaceTreeDisplayVersion</key><string>$display_version</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
@@ -80,7 +86,7 @@ macOS Gatekeeper may block its first launch. Only allow a build you trust.
 For protected folders, grant SpaceTree Full Disk Access in System Settings.
 TXT
 
-dmg="$output_dir/SpaceTree-$version-universal.dmg"
+dmg="$output_dir/SpaceTree-$display_version-universal.dmg"
 hdiutil create -volname SpaceTree -srcfolder "$work_dir/image" -format UDZO -ov "$dmg"
 hdiutil verify "$dmg"
 mkdir "$work_dir/mounted"
