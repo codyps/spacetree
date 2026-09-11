@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Time Machine changes · SpaceTree</title>
+<style>
+:root{color-scheme:light dark;--bg:#f3f5f7;--panel:#fff;--text:#18242c;--muted:#4f616c;--line:#ccd4d9;--accent:#00695d;--wash:#dcefe9;--warn:#854900}
+@media(prefers-color-scheme:dark){:root{--bg:#101719;--panel:#192226;--text:#e4edef;--muted:#b0bfc4;--line:#415258;--accent:#74d7bd;--wash:#203f38;--warn:#ffc275}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:1rem/1.5 system-ui,-apple-system,sans-serif}main,header{max-width:1400px;margin:auto;padding:1.5rem 2rem}header{padding-bottom:0}h1{font-size:2.15rem;letter-spacing:-.04em;margin:.35rem 0}h2{font-size:1.15rem;margin:0 0 .8rem}p{max-width:90ch;color:var(--muted);margin:.5rem 0}.brand{font-size:.8rem;letter-spacing:.12em;color:var(--accent);font-weight:750}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1.25rem;margin:0 0 1.2rem}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}.metric{font-size:1.9rem;font-weight:650;letter-spacing:-.03em}.muted,small{color:var(--muted)}small{font-size:.8rem}.toolbar{display:flex;gap:1rem;align-items:end;flex-wrap:wrap;margin:1rem 0}label{display:block;font-size:.85rem;font-weight:600;margin-bottom:.25rem}input,select,button{font:inherit;color:var(--text);background:var(--panel);border:1px solid #778a94;border-radius:6px;padding:.45rem .65rem}button{cursor:pointer}button:hover{background:var(--wash)}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}input[type=search]{min-width:260px}#timeline{display:flex;align-items:stretch;gap:3px;height:160px;overflow-x:auto;padding:6px 3px}.tick{padding:0;border:0;border-radius:3px;min-width:14px;flex:1;background:transparent;display:flex;flex-direction:column;justify-content:end}.tick span{background:var(--accent);opacity:.6;border-radius:3px 3px 0 0;min-height:3px;width:100%}.tick[aria-pressed=true]{outline:2px solid var(--accent);outline-offset:1px}.tick[aria-pressed=true] span{opacity:1}.tick:disabled{cursor:default}.range{display:flex;justify-content:space-between;font-size:.8rem;color:var(--muted)}.barrow{display:grid;grid-template-columns:minmax(140px,1fr) minmax(100px,1.3fr) 100px;gap:1rem;align-items:center;margin:.65rem 0;font-size:.85rem}.barname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.track{background:var(--bg);height:16px;border-radius:3px}.fill{background:var(--accent);height:100%;border-radius:3px}.number{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.table-scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:.85rem}caption{text-align:left;color:var(--muted);padding:.5rem 0}th,td{padding:.7rem .65rem;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{white-space:nowrap}th button{border:0;padding:0;background:transparent;font-size:inherit;font-weight:700}td.path{min-width:280px;max-width:640px;overflow-wrap:anywhere;font-family:ui-monospace,monospace;font-size:.8rem}.path button{font:inherit;text-align:left;border:0;padding:0;color:var(--accent);background:transparent;overflow-wrap:anywhere}.badge{font-size:.7rem;padding:.15rem .35rem;background:var(--wash);border-radius:4px;white-space:nowrap}.warning{color:var(--warn);white-space:pre-wrap;overflow-wrap:anywhere}.pager{display:flex;gap:1rem;align-items:center;justify-content:end;margin-top:1rem}.footnote{font-size:.85rem}.skip{position:absolute;left:-10000px}.skip:focus{left:1rem;top:1rem;background:var(--panel);padding:1rem;z-index:1}details{margin-top:1rem}summary{cursor:pointer}#scope{font-family:ui-monospace,monospace;font-size:.85rem;overflow-wrap:anywhere}#status{min-height:1.5em}.date-note{font-size:.85rem}.empty{padding:2rem 0;color:var(--muted)}@media(max-width:700px){main,header{padding:1rem}.cards{grid-template-columns:1fr}.metric{font-size:1.5rem}.barrow{grid-template-columns:minmax(80px,1fr) minmax(50px,1fr) 80px;gap:.5rem}input[type=search]{min-width:0;width:100%}}
+</style>
+<a class="skip" href="#content">Skip to report</a>
+<header><div class="brand">SPACETREE / TIME MACHINE</div><h1>What keeps changing?</h1><p id="source"></p></header>
+<main id="content" tabindex="-1">
+<noscript>This report needs JavaScript for filtering. The full data is available in report.json beside this file.</noscript>
+<div class="cards">
+<div class="panel"><div class="muted">Backups in the manifest</div><div class="metric" id="backups"></div><small id="dates"></small></div>
+<div class="panel"><div class="muted">Median recorded changed size</div><div class="metric" id="median"></div><small>Logical bytes, per retained manifest entry</small></div>
+<div class="panel"><div class="muted">File comparisons completed</div><div class="metric" id="compared"></div><small id="progress"></small></div>
+</div>
+<p id="quality" class="warning"></p>
+<section class="panel"><h2>Backup history</h2><p class="footnote">Time Machine’s manifest records changed logical bytes for each backup. Select a bar to inspect its recorded totals; file details are available for compared intervals.</p>
+<div class="toolbar"><div><label for="historyRange">History range</label><select id="historyRange"><option value="7">Latest 7 days</option><option value="14">Latest 14 days</option><option value="all">All recorded backups</option></select></div><div><label for="scale">Bar scale</label><select id="scale"><option value="linear">Linear</option><option value="log">Logarithmic</option></select></div><button id="historyReset">Clear backup selection</button></div>
+<div id="timeline" aria-label="Changed bytes per backup"></div><div class="range"><span id="first"></span><span id="last"></span></div><p id="selectedBackup" class="date-note"></p>
+<details><summary>View recorded totals as a table</summary><div class="table-scroll"><table><caption>Recorded backup manifest entries, dates in the backup machine’s local time</caption><thead><tr><th scope="col">Completed</th><th scope="col">Changed logical size</th><th scope="col">Changed physical size</th><th scope="col">Changed items</th></tr></thead><tbody id="historyRows"></tbody></table></div></details></section>
+<section class="panel"><h2>Largest sources of change</h2><p class="footnote">Affected size sums the full newer sizes of added and modified files or subtrees. It is a ranking signal, not a measurement of new APFS blocks. Same-size rewrites still count; removals are listed separately.</p>
+<div class="toolbar"><div><label for="interval">Comparison</label><select id="interval"></select></div><div><label for="view">Group by</label><select id="view"><option value="folders">Folders</option><option value="items">Files / changed subtrees</option></select></div><div id="depthControl"><label for="depth">Folder depth</label><select id="depth"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option><option>6</option><option>7</option><option>8</option></select></div><div><label for="metric">Rank by</label><select id="metric"><option value="bytes">Affected size</option><option value="frequency">Intervals changed</option><option value="count">Change records</option><option value="removed">Removed size</option></select></div><div><label for="search">Filter paths</label><input id="search" type="search" placeholder="e.g. .codex, Firefox, dev/p"></div><button id="reset">Reset filters</button></div>
+<p id="scope"></p><p id="status" role="status"></p><div id="bars"></div><div class="table-scroll"><table><caption id="caption">Ranked changes</caption><thead><tr><th scope="col">Path</th><th scope="col" data-key="bytes"><button data-sort="bytes">Affected size</button></th><th scope="col" data-key="frequency"><button data-sort="frequency">Intervals</button></th><th scope="col" data-key="count"><button data-sort="count">Records</button></th><th scope="col" data-key="removed"><button data-sort="removed">Removed size</button></th><th scope="col">Kinds</th></tr></thead><tbody id="rows"></tbody></table></div><div class="pager"><button id="previous">Previous</button><span id="page"></span><button id="next">Next</button></div></section>
+<section class="panel"><h2>Coverage and interpretation</h2><p id="coverage"></p><p class="footnote">Comparisons check sizes and modification times using <code>tmutil compare -s -t -E -X</code>. They do not read file contents to verify equality, detect metadata-only changes such as ACLs or xattrs, or measure unique storage. Added or removed directories may appear as a single subtree record; their sizes are counted once. Record counts are not necessarily file counts. Renames may appear as a removal plus an addition. Intervals may span more than one backup when snapshots are missing.</p><p class="footnote">The manifest’s physical-size field is shown as recorded; it is not a promise about unique or reclaimable storage. Historical snapshots retain deleted files. No backup files are modified by this tool.</p><details><summary>Comparison warnings and errors</summary><div id="warnings" class="warning"></div></details></section>
+</main>
+<script id="report-data" type="application/json">/*REPORT_DATA*/</script>
+<script>
+'use strict';
+const report=JSON.parse(document.getElementById('report-data').textContent);
+const $=id=>document.getElementById(id);
+const fmt=n=>{const sign=n<0?'-':'';n=Math.abs(n);const units=['B','KB','MB','GB','TB'];let u=0;while(n>=1000&&u<4){n/=1000;u++}return sign+n.toLocaleString(undefined,{maximumFractionDigits:u?2:0})+' '+units[u]};
+const date=id=>id.slice(0,10)+' '+id.slice(11,13)+':'+id.slice(13,15);
+function cell(tag,text,cls){const e=document.createElement(tag);e.textContent=text;if(cls)e.className=cls;return e}
+let selected=null,page=0,scope='',display=[];
+$('source').textContent=report.destination+' · Generated '+new Date(report.generated).toLocaleString();
+$('backups').textContent=report.timeline.length;
+const values=report.timeline.map(x=>x.logical).sort((a,b)=>a-b),mid=Math.floor(values.length/2);
+$('median').textContent=values.length?fmt(values.length%2?values[mid]:(values[mid-1]+values[mid])/2):'—';
+$('dates').textContent=report.timeline.length?date(report.timeline[0].id)+' – '+date(report.timeline.at(-1).id):'No manifest entries';
+$('compared').textContent=report.comparisons.length;
+$('progress').textContent=report.pending?report.pending+' remaining; reload this page as analysis finishes':'Cached comparisons, ready to explore';
+$('coverage').textContent=Object.keys(report.snapshots).length+' read-only snapshots discovered. '+report.comparisons.length+' intervals compared. Frequency is measured only across the selected comparisons, not the whole history.';
+$('quality').textContent=report.errors.length||report.comparisons.some(c=>c.warnings.length)?'Some comparisons reported errors or warnings. See Coverage and interpretation before relying on these totals.':'';
+$('warnings').textContent=[...report.errors,...report.comparisons.flatMap(c=>c.warnings.map(w=>c.newer+': '+w))].join('\n')||'No warnings reported by the completed comparisons. This is not a content-verification pass.';
+$('interval').append(new Option('All inspected intervals','all'));
+const unavailable=new Option('Not compared (manifest only)','none');unavailable.disabled=true;$('interval').append(unavailable);
+report.comparisons.forEach((c,i)=>$('interval').append(new Option(date(c.older)+' → '+date(c.newer),String(i))));
+function timeline(){
+ const latest=report.timeline.length?new Date(report.timeline.at(-1).date).getTime():0;
+ const rows=report.timeline.filter(x=>$('historyRange').value==='all'||latest-new Date(x.date).getTime()<=Number($('historyRange').value)*86400000);
+ const transform=x=>$('scale').value==='log'?Math.log10(1+x):x;
+ const max=Math.max(1,...rows.map(x=>transform(x.logical)));
+ $('timeline').replaceChildren();$('historyRows').replaceChildren();
+ for(const r of rows){
+  const button=cell('button','');button.className='tick';button.setAttribute('aria-label',date(r.id)+', '+fmt(r.logical));button.title=date(r.id)+' · '+fmt(r.logical);button.setAttribute('aria-pressed',String(selected===r.id));
+  const bar=cell('span','');bar.style.height=Math.max(2,transform(r.logical)/max*100)+'%';button.append(bar);
+  button.onclick=()=>{selected=r.id;const i=report.comparisons.findIndex(c=>c.newer===r.id);$('interval').value=i>=0?String(i):'none';page=0;timeline();render()};$('timeline').append(button);
+  const tr=document.createElement('tr');[date(r.id),fmt(r.logical),fmt(r.physical),r.count.toLocaleString()].forEach(t=>tr.append(cell('td',t)));$('historyRows').append(tr);
+ }
+ $('first').textContent=rows.length?date(rows[0].id):'';$('last').textContent=rows.length?date(rows.at(-1).id):'';
+ const row=report.timeline.find(x=>x.id===selected);
+ $('selectedBackup').textContent=row?date(row.id)+' · '+fmt(row.logical)+' logical / '+fmt(row.physical)+' physical / '+row.count.toLocaleString()+' changed items. '+(report.comparisons.some(c=>c.newer===row.id)?'File comparison available below.':'This backup has not been compared; only manifest totals are available.'):'Select any bar for the recorded totals.';
+}
+function aggregate(){
+ const index=$('interval').value;
+ const pairs=index==='all'?report.comparisons:(report.comparisons[Number(index)]&&index!==''?[report.comparisons[Number(index)]]:[]);
+ const groups=new Map(),query=$('search').value.toLowerCase(),folder=$('view').value==='folders',depth=Number($('depth').value);
+ for(const c of pairs){for(const r of c.rows){
+  if(query&&!r.path.toLowerCase().includes(query))continue;
+  if(scope&&r.path!==scope&&!r.path.startsWith(scope+'/'))continue;
+  const components=r.path.split('/');
+  const key=folder?components.slice(0,depth).join('/'):r.path;
+  let g=groups.get(key);if(!g){g={path:key,bytes:0,removed:0,count:0,intervals:new Set(),kinds:new Set(),subtree:false,drillable:false};groups.set(key,g)}
+  g.bytes+=r.bytes;g.removed+=r.removed;g.count++;g.intervals.add(c.older+'>'+c.newer);g.kinds.add(r.kind);g.subtree ||= r.subtree;g.drillable ||= folder&&components.length>depth;
+ }}
+ const metric=$('metric').value;
+ return [...groups.values()].map(g=>({...g,frequency:g.intervals.size})).sort((a,b)=>b[metric]-a[metric]||a.path.localeCompare(b.path));
+}
+function drill(path){scope=path;$('view').value='folders';const depth=path.split('/').length+1;if(depth>8){$('view').value='items'}else{$('depth').value=String(depth)}page=0;render()}
+function render(){
+ display=aggregate();const metric=$('metric').value,isBytes=metric==='bytes'||metric==='removed';
+ $('depthControl').hidden=$('view').value!=='folders';
+ document.querySelectorAll('th[data-key]').forEach(th=>th.setAttribute('aria-sort',th.dataset.key===metric?'descending':'none'));
+ $('scope').textContent=scope?'Within: '+scope+' (Reset filters to return to all paths)':'';
+ $('status').textContent=display.length?display.length.toLocaleString()+' ranked paths · '+fmt(display.reduce((n,r)=>n+r.bytes,0))+' affected size in this filter':'No compared changes match this selection.';
+ $('bars').replaceChildren();const max=display.length?Math.max(1,display[0][metric]):1;
+ for(const r of display.slice(0,12)){
+  const row=cell('div','','barrow'),name=cell('div',r.path,'barname');name.title=r.path;
+  const track=cell('div','','track'),fill=cell('div','','fill');fill.style.width=(r[metric]/max*100)+'%';track.setAttribute('aria-hidden','true');track.append(fill);
+  row.append(name,track,cell('div',isBytes?fmt(r[metric]):r[metric].toLocaleString(),'number'));$('bars').append(row);
+ }
+ const pages=Math.max(1,Math.ceil(display.length/50));page=Math.min(page,pages-1);$('rows').replaceChildren();
+ for(const r of display.slice(page*50,(page+1)*50)){
+  const row=document.createElement('tr'),name=cell('td','','path');
+  if(r.drillable){const button=cell('button',r.path+'/');button.onclick=()=>drill(r.path);name.append(button)}else{name.textContent=r.path;if(r.subtree)name.append(' ',cell('span','subtree','badge'))}
+  row.append(name,cell('td',fmt(r.bytes),'number'),cell('td',r.frequency,'number'),cell('td',r.count.toLocaleString(),'number'),cell('td',fmt(r.removed),'number'),cell('td',[...r.kinds].join(', ')));$('rows').append(row);
+ }
+ $('caption').textContent='Sorted by '+$('metric').selectedOptions[0].textContent.toLowerCase()+', largest first. Folder rows open a deeper level.';
+ $('page').textContent=(page+1)+' / '+pages;$('previous').disabled=page===0;$('next').disabled=page===pages-1;
+}
+['view','depth','metric'].forEach(id=>$(id).onchange=()=>{page=0;render()});
+$('interval').onchange=()=>{selected=null;page=0;timeline();render()};
+let searchTimer;$('search').oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{page=0;render()},150)};
+['historyRange','scale'].forEach(id=>$(id).onchange=timeline);
+$('historyReset').onclick=()=>{selected=null;$('interval').value='all';page=0;timeline();render()};
+$('reset').onclick=()=>{scope='';$('search').value='';$('depth').value='5';page=0;render()};
+$('previous').onclick=()=>{page--;render()};$('next').onclick=()=>{page++;render()};
+ document.querySelectorAll('[data-sort]').forEach(b=>b.onclick=()=>{$('metric').value=b.dataset.sort;page=0;render()});
+timeline();render();
+</script>
+</html>

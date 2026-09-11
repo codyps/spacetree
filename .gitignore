@@ -3,3 +3,5 @@
 .swiftpm/
 DerivedData/
 dist/
+backup-reports/
+scripts/time-machine/__pycache__/

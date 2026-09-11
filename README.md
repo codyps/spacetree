@@ -95,6 +95,19 @@ Completed trees are stored as binary snapshots in the user's Application Support
 
 ## Verify
 
+### Time Machine change reports
+
+The standalone [Time Machine change explorer](scripts/time-machine/README.md)
+compares mounted backup snapshots and creates an offline interactive report of
+recorded backup sizes, frequently changed files, and folder contributions:
+
+```sh
+python3 scripts/time-machine/analyze.py "/Volumes/T7 Shield" --output backup-reports/t7
+open backup-reports/t7/index.html
+```
+
+### App tests
+
 ```sh
 swift test
 ```
