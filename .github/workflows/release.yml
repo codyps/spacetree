@@ -27,7 +27,6 @@ jobs:
       contents: write
       issues: write
       pull-requests: write
-      actions: write
     outputs:
       tag: ${{ steps.target.outputs.tag }}
       sha: ${{ steps.target.outputs.sha }}
@@ -36,22 +35,10 @@ jobs:
         id: release
         if: inputs.retry_tag == ''
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           target-branch: main
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-      # GITHUB_TOKEN-created PRs don't trigger pull_request CI. Explicit dispatch
-      # does, and the normal macOS workflow validates the bot branch read-only.
-      - name: Run CI on the release PR
-        if: steps.release.outputs.prs_created == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_PRS: ${{ steps.release.outputs.prs }}
-        run: |
-          jq -er '.[] | select(.baseBranchName == "main") | .headBranchName' <<< "$RELEASE_PRS" |
-            while IFS= read -r branch; do
-              gh workflow run macos.yml --ref "$branch"
-            done
       - name: Resolve draft release to an immutable commit
         id: target
         env:
