@@ -1,3 +1,4 @@
+import CoreServices
 import CryptoKit
 import Foundation
 import Testing
@@ -362,7 +363,10 @@ import SpaceTreeNative
     let tree = try builder.finalize()
 
     #expect(tree.nodeCount == 100_001)
-    #expect(tree.estimatedStorageBytes < 13 * 1_024 * 1_024)
+    #expect(MemoryLayout<NodeRecord>.stride <= 64)
+    // Array capacity includes allocator-dependent spare storage. Keep a bounded
+    // allocation budget while checking the compact record layout separately.
+    #expect(tree.estimatedStorageBytes < 16 * 1_024 * 1_024)
     try tree.validate()
 }
 
@@ -422,7 +426,12 @@ import SpaceTreeNative
     target.scan()
     try await waitForScan(target)
     guard target.changeTrackingAvailable else { return }
-    try Data([1, 2, 3]).write(to: base.appendingPathComponent("changed.bin"))
+    let writer = Process()
+    writer.executableURL = URL(fileURLWithPath: "/usr/bin/touch")
+    writer.arguments = [base.appendingPathComponent("changed.bin").path]
+    try writer.run()
+    writer.waitUntilExit()
+    #expect(writer.terminationStatus == 0)
 
     let deadline = ContinuousClock.now + .seconds(4)
     while !target.hasFilesystemChanges, ContinuousClock.now < deadline {
@@ -435,7 +444,12 @@ import SpaceTreeNative
     #expect(target.currentChildren.contains(where: { $0.name == "changed.bin" }))
     #expect(!target.hasFilesystemChanges)
 
-    try manager.createDirectory(at: base.appendingPathComponent("new-folder"), withIntermediateDirectories: false)
+    let mkdir = Process()
+    mkdir.executableURL = URL(fileURLWithPath: "/bin/mkdir")
+    mkdir.arguments = [base.appendingPathComponent("new-folder").path]
+    try mkdir.run()
+    mkdir.waitUntilExit()
+    #expect(mkdir.terminationStatus == 0)
     let secondDeadline = ContinuousClock.now + .seconds(4)
     while !target.hasFilesystemChanges, ContinuousClock.now < secondDeadline {
         try await Task.sleep(for: .milliseconds(25))
@@ -634,4 +648,21 @@ private func childMetadata(_ tree: ScanTree, _ nodeID: NodeID) -> [NodeMetadata]
     recorder.directory(path: "/tmp", duration: .seconds(1), entries: 100)
     #expect(record.enumeratedEntries == 0)
     #expect(recorder.finish(outcome: "complete", progress: progress) == nil)
+}
+
+@Test func filesystemHistorySentinelDoesNotInvalidateScan() {
+    let history = FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone)
+    #expect(FilesystemChangeMonitor.change(paths: ["/"], flags: [history], ids: [42]) == nil)
+    let change = FilesystemChangeMonitor.change(
+        paths: ["/folder/file", "/"],
+        flags: [FSEventStreamEventFlags(kFSEventStreamEventFlagItemCreated), history],
+        ids: [41, 42]
+    )
+    #expect(change?.paths == ["/folder/file"])
+    #expect(change?.latestEventID == 41)
+    #expect(change?.requiresFullScan == false)
+    let dropped = FilesystemChangeMonitor.change(
+        paths: ["/"], flags: [FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped)], ids: [43]
+    )
+    #expect(dropped?.requiresFullScan == true)
 }

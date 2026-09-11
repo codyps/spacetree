@@ -356,9 +356,10 @@ final class ScanTarget: Identifiable {
 
     private func startChangeTracking(since eventID: UInt64) {
         changeMonitor?.stop()
+        let expectedGeneration = generation
         let monitor = FilesystemChangeMonitor(paths: roots.map(\.url.path), since: eventID) { [weak self] change in
             Task { @MainActor [weak self] in
-                guard let self else { return }
+                guard let self, self.generation == expectedGeneration else { return }
                 self.hasFilesystemChanges = true
                 self.changedPathCount += max(1, change.paths.count)
                 self.changedPaths.formUnion(change.paths)

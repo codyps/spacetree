@@ -34,21 +34,13 @@ final class FilesystemChangeMonitor: @unchecked Sendable {
                 guard let info else { return }
                 let monitor = Unmanaged<FilesystemChangeMonitor>.fromOpaque(info).takeUnretainedValue()
                 let paths = unsafeBitCast(pathsPointer, to: NSArray.self) as? [String] ?? []
-                var requiresFullScan = false
-                var latestID: UInt64 = 0
-                for index in 0..<count {
-                    let flags = flagsPointer[index]
-                    latestID = max(latestID, idsPointer[index])
-                    if flags & FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs) != 0
-                        || flags & FSEventStreamEventFlags(kFSEventStreamEventFlagUserDropped) != 0
-                        || flags & FSEventStreamEventFlags(kFSEventStreamEventFlagKernelDropped) != 0
-                        || flags & FSEventStreamEventFlags(kFSEventStreamEventFlagEventIdsWrapped) != 0
-                        || flags & FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged) != 0 {
-                        requiresFullScan = true
-                    }
+                if let change = FilesystemChangeMonitor.change(
+                    paths: paths,
+                    flags: Array(UnsafeBufferPointer(start: flagsPointer, count: count)),
+                    ids: Array(UnsafeBufferPointer(start: idsPointer, count: count))
+                ) {
+                    monitor.callback(change)
                 }
-                guard !paths.isEmpty || requiresFullScan else { return }
-                monitor.callback(Change(paths: paths, requiresFullScan: requiresFullScan, latestEventID: latestID))
             },
             &context,
             paths as CFArray,
@@ -64,6 +56,25 @@ final class FilesystemChangeMonitor: @unchecked Sendable {
                 self.stream = nil
             }
         }
+    }
+
+    // HistoryDone is a stream sentinel; its path does not describe a change.
+    static func change(paths: [String], flags: [FSEventStreamEventFlags], ids: [FSEventStreamEventId]) -> Change? {
+        var changedPaths: [String] = []
+        var requiresFullScan = false
+        var latestID: UInt64 = 0
+        for index in flags.indices {
+            let flag = flags[index]
+            guard flag & FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone) == 0 else { continue }
+            latestID = max(latestID, ids[index])
+            changedPaths.append(paths[index])
+            let fullScanFlags = kFSEventStreamEventFlagMustScanSubDirs
+                | kFSEventStreamEventFlagUserDropped | kFSEventStreamEventFlagKernelDropped
+                | kFSEventStreamEventFlagEventIdsWrapped | kFSEventStreamEventFlagRootChanged
+            requiresFullScan = requiresFullScan || flag & FSEventStreamEventFlags(fullScanFlags) != 0
+        }
+        guard !changedPaths.isEmpty || requiresFullScan else { return nil }
+        return Change(paths: changedPaths, requiresFullScan: requiresFullScan, latestEventID: latestID)
     }
 
     func stop() {
