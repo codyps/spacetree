@@ -15,6 +15,7 @@ SpaceTree is a native macOS disk space analyzer inspired by WizTree. It discover
 - Allocated and logical byte accounting
 - Hard-link and repeat-traversal deduplication using filesystem device/inode identity
 - Live item, byte, path, and unreadable-file progress
+- Estimated scan progress and time remaining using volume file/directory counts
 - Independent, cancellable scans that can run in parallel
 - Persistent results for every scanned volume or folder
 - Native mount-table and IOKit discovery of APFS containers and other filesystems
@@ -185,6 +186,8 @@ Then quit and reopen SpaceTree before scanning again.
 SpaceTree uses the native mount table and I/O Registry directly; it does not invoke `diskutil`. Mounted APFS filesystems that share an `AppleAPFSContainer` UUID—such as the startup System, Data, VM, Preboot, Nix, and development volumes—are combined into one scan target. External APFS containers and non-APFS filesystems remain separate. Time Machine backup volumes, mounted snapshots, disk images, and developer simulator/low-level system mounts are excluded by default from the dashboard and "Scan All", but can be enabled on demand with the dashboard's **Time Machine**, **Disk images**, and **Developer/system** checkboxes.
 
 Container scans coalesce overlapping roots and track directory device/inode identities before scheduling enumeration. This prevents macOS firmlink aliases such as `/Users` and `/System/Volumes/Data/Users` from being traversed twice. Distinct mounted filesystems remain separate scan roots, and enumeration stops at device boundaries.
+
+Full scans estimate progress from volume file and directory counts when available, weighting completed directory reads more heavily than discovered items. The startup estimate includes both System and Data volumes once. When volume counts are unavailable, SpaceTree uses a previous complete scan of the same roots, then allocated space as a rough fallback for volume scans. Time remaining uses smoothed scan speed, with the final 10% reserved for finishing. Counts can differ from accessible contents, so percentages and times are approximate; stalled or exceeded estimates stop showing an ETA. First-time folder scans and incremental updates remain indeterminate when no suitable total is known.
 
 ### Treemap performance
 

@@ -42,6 +42,9 @@ int st_list_directory_with_diagnostics(const char *path,
 // Enables process scan protections; returns errno on failure.
 int st_prepare_metadata_scan(void);
 
+// Optional volume-wide counts; callers must restrict these to whole-volume scans.
+int st_volume_counts(const char *path, uint64_t *files, uint64_t *directories);
+
 // Returns 0 on success and an errno value on failure.
 int st_list_directory(
     const char *path,

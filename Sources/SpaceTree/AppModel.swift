@@ -35,6 +35,7 @@ final class ScanTarget: Identifiable {
     var state: State = .idle
     var restorationStage = "Checking for previous scan…"
     var progress: ScanProgress
+    var scanTimeEstimate: ScanTimeEstimate?
     var tree: ScanTree? {
         didSet {
             guard tree?.generation != oldValue?.generation else { return }
@@ -184,6 +185,21 @@ final class ScanTarget: Identifiable {
     }
 
     func scan() {
+        let previous = scanStatistics
+        let priorBudget: ScanWorkBudget?
+        if let previous, previous.outcome == "complete", previous.mode == "full",
+           Set(previous.roots) == Set(roots.map(\.url.path)),
+           previous.itemCount > 0, previous.enumeratedDirectories > 0 {
+            priorBudget = ScanWorkBudget(items: Double(previous.itemCount),
+                                        directories: Double(previous.enumeratedDirectories),
+                                        basis: "Previous complete scan")
+        } else if isVolume, let totalCapacity, let availableCapacity,
+                  totalCapacity > availableCapacity, availableCapacity >= 0 {
+            priorBudget = ScanWorkBudget(bytes: Double(totalCapacity - availableCapacity),
+                                        basis: "Allocated space (rough estimate)")
+        } else {
+            priorBudget = nil
+        }
         endStatistics(outcome: "cancelled")
         task?.cancel()
         changeMonitor?.stop()
@@ -192,6 +208,7 @@ final class ScanTarget: Identifiable {
         generation = UUID()
         let thisGeneration = generation
         let scanStartedAt = Date()
+        scanTimeEstimate = ScanTimeEstimate(startedAt: scanStartedAt, budget: priorBudget)
         let recorder = ScanStatisticsRecorder(targetID: id, roots: roots.map(\.url.path), mode: "full")
         statisticsRecorder = recorder
         let startingEventID = UInt64(FSEventsGetCurrentEventId())
@@ -209,6 +226,14 @@ final class ScanTarget: Identifiable {
         task = Task { [weak self] in
             guard let self else { return }
             do {
+                if isVolume {
+                    let scanRoots = roots
+                    let budget = await Task.detached(priority: .utility) {
+                        ScanWorkBudget.volumeCounts(roots: scanRoots)
+                    }.value
+                    guard !Task.isCancelled, generation == thisGeneration else { return }
+                    if let budget { scanTimeEstimate?.budget = budget }
+                }
                 let result = try await DiskScanner.scan(
                     roots: roots,
                     displayName: name,
@@ -218,6 +243,7 @@ final class ScanTarget: Identifiable {
                     await MainActor.run {
                         guard let self, self.generation == thisGeneration else { return }
                         self.progress = update
+                        self.scanTimeEstimate?.update(update, at: Date())
                     }
                 }
                 guard !Task.isCancelled, generation == thisGeneration else { return }
@@ -384,6 +410,9 @@ final class ScanTarget: Identifiable {
         statisticsRecorder = recorder
         let startingEventID = UInt64(FSEventsGetCurrentEventId())
         let paths = Array(changedPaths)
+        // Subtree refreshes can run several independent enumerations and
+        // finishing passes. Whole-volume totals do not describe that work.
+        scanTimeEstimate = nil
         state = .scanning
         progress = ScanProgress(currentPath: paths.first ?? url.path, itemCount: 0, bytesFound: 0, unreadableCount: 0)
 

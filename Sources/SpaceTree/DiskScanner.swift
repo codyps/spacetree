@@ -9,6 +9,7 @@ struct ScanProgress: Codable, Equatable, Sendable {
     var unreadableCount: Int
     var duplicateReferenceCount: Int = 0
     var finishing: ScanTreeBuilder.FinishingProgress? = nil
+    var enumeratedDirectories: Int? = nil
 }
 
 struct ScanRoot: Codable, Equatable, Sendable {
@@ -233,6 +234,7 @@ enum DiskScanner {
                 bytesFound: 0,
                 unreadableCount: 0
             )
+            state.enumeratedDirectories = 0
             var lastUpdate = ContinuousClock.now
 
             try await withThrowingTaskGroup(of: DirectoryBatch.self) { group in
@@ -258,6 +260,7 @@ enum DiskScanner {
                     try Task.checkCancellation()
                     guard let batch = try await group.next() else { break }
                     activeWorkers -= 1
+                    state.enumeratedDirectories = (state.enumeratedDirectories ?? 0) + 1
                     if batch.unreadable {
                         builder.markUnreadable(batch.work.nodeID)
                         state.unreadableCount += 1

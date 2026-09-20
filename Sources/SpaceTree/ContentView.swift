@@ -225,6 +225,32 @@ private struct ScanTargetCard: View {
                         .frame(width: 80, alignment: .trailing)
                     Button("Stop", role: .cancel, action: target.cancel)
                 }
+                if let estimate = target.scanTimeEstimate {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if let fraction = estimate.fraction {
+                            ProgressView(value: fraction)
+                                .progressViewStyle(.linear)
+                                .accessibilityLabel("Estimated scan progress")
+                        } else {
+                            ProgressView().progressViewStyle(.linear)
+                                .accessibilityLabel("Scanning")
+                        }
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            HStack {
+                                Text(estimate.timeRemainingLabel(at: context.date))
+                                Spacer(minLength: 4)
+                                if let fraction = estimate.fraction {
+                                    Text("≈\(Int(fraction * 100))%")
+                                }
+                            }
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(width: 330)
+                    .help("\(estimate.budget?.basis ?? "Waiting for a workload estimate"). Estimates adapt to scan speed and reserve time for finishing. Permissions, snapshots, clones, and filesystem changes can affect accuracy.")
+                }
                 // Both scan phases occupy the same single-line status slot.
                 Group {
                     if let finishing = target.progress.finishing {

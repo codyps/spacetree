@@ -28,6 +28,26 @@ int st_prepare_metadata_scan(void) {
     return s_policy_error;
 }
 
+int st_volume_counts(const char *path, uint64_t *files, uint64_t *directories) {
+    if (path == NULL || files == NULL || directories == NULL) return EINVAL;
+    struct attrlist attributes = {0};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.commonattr = ATTR_CMN_RETURNED_ATTRS;
+    attributes.volattr = ATTR_VOL_INFO | ATTR_VOL_FILECOUNT | ATTR_VOL_DIRCOUNT;
+    struct __attribute__((packed, aligned(4))) {
+        uint32_t length;
+        attribute_set_t returned;
+        uint32_t files;
+        uint32_t directories;
+    } result = {0};
+    if (getattrlist(path, &attributes, &result, sizeof(result), FSOPT_NOFOLLOW | FSOPT_PACK_INVAL_ATTRS) != 0) return errno;
+    const uint32_t required = ATTR_VOL_FILECOUNT | ATTR_VOL_DIRCOUNT;
+    if (result.length != sizeof(result) || (result.returned.volattr & required) != required) return ENOTSUP;
+    *files = result.files;
+    *directories = result.directories;
+    return 0;
+}
+
 typedef struct __attribute__((packed, aligned(4))) {
     uint32_t length;
     attribute_set_t returned;
