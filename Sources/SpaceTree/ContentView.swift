@@ -225,6 +225,10 @@ private struct ScanTargetCard: View {
                         .frame(width: 80, alignment: .trailing)
                     Button("Stop", role: .cancel, action: target.cancel)
                 }
+                ScanElapsedTime(target: target)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 330, alignment: .trailing)
                 if let estimate = target.scanTimeEstimate {
                     VStack(alignment: .leading, spacing: 3) {
                         if let fraction = estimate.fraction {
@@ -285,6 +289,9 @@ private struct ScanTargetCard: View {
                         Text(completionDetail(root: root))
                             .font(.caption)
                             .foregroundStyle(target.hasFilesystemChanges ? .orange : .secondary)
+                        ScanElapsedTime(target: target)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 Button("View") { model.show(target) }
@@ -329,10 +336,28 @@ private struct ScanTargetCard: View {
         if target.hasFilesystemChanges {
             return "Changes detected · \(root.fileCount.formatted()) files"
         }
-        if let duration = target.scanDuration {
-            return "\(root.fileCount.formatted()) files · \(duration.formatted(.number.precision(.fractionLength(1))))s"
-        }
         return "\(root.fileCount.formatted()) files"
+    }
+}
+
+private struct ScanElapsedTime: View {
+    let target: ScanTarget
+
+    var body: some View {
+        Group {
+            if target.state == .scanning, let startedAt = target.scanStartedAt {
+                TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                    Text("Elapsed \(formatted(context.date.timeIntervalSince(startedAt)))")
+                }
+            } else if let duration = target.scanDuration {
+                Text("Scanned in \(formatted(duration))")
+            }
+        }
+        .monospacedDigit()
+    }
+
+    private func formatted(_ seconds: TimeInterval) -> String {
+        Duration.seconds(max(0, seconds)).formatted(.time(pattern: .hourMinuteSecond))
     }
 }
 
@@ -485,6 +510,7 @@ private struct ScanInfoBar: View {
                     .help("Allocated size")
                 Text("\(current.fileCount.formatted()) files")
                 Text("\(max(0, current.directoryCount - 1).formatted()) folders")
+                ScanElapsedTime(target: target)
                 if current.duplicateReferenceCount > 0 {
                     Text("\(current.duplicateReferenceCount.formatted()) links")
                         .help("Hard-link references already counted elsewhere are not recounted.")

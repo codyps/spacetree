@@ -75,6 +75,7 @@ final class ScanTarget: Identifiable {
     var selectedID: NodeID?
     var searchText = ""
     var scannedAt: Date?
+    private(set) var scanStartedAt: Date?
     var scanDuration: TimeInterval?
     var scanStatistics: ScanStatistics?
     var statisticsSaveError: String?
@@ -208,6 +209,7 @@ final class ScanTarget: Identifiable {
         generation = UUID()
         let thisGeneration = generation
         let scanStartedAt = Date()
+        self.scanStartedAt = scanStartedAt
         scanTimeEstimate = ScanTimeEstimate(startedAt: scanStartedAt, budget: priorBudget)
         let recorder = ScanStatisticsRecorder(targetID: id, roots: roots.map(\.url.path), mode: "full")
         statisticsRecorder = recorder
@@ -406,6 +408,7 @@ final class ScanTarget: Identifiable {
         generation = UUID()
         let thisGeneration = generation
         let scanStartedAt = Date()
+        self.scanStartedAt = scanStartedAt
         let recorder = ScanStatisticsRecorder(targetID: id, roots: roots.map(\.url.path), mode: "incremental")
         statisticsRecorder = recorder
         let startingEventID = UInt64(FSEventsGetCurrentEventId())
