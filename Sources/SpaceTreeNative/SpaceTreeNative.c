@@ -215,7 +215,8 @@ static int st_list_directory_impl(
             &attributes,
             buffer,
             buffer_size,
-            FSOPT_NOFOLLOW | FSOPT_PACK_INVAL_ATTRS | FSOPT_RETURN_REALDEV
+            // Match lstat/fstatat's unified device IDs on the startup volume.
+            FSOPT_NOFOLLOW | FSOPT_PACK_INVAL_ATTRS
                 | (include_clones ? FSOPT_ATTR_CMN_EXTENDED : 0)
         );
         if (batch_count == 0) break;
@@ -269,7 +270,17 @@ static int st_list_directory_impl(
                 error = EIO;
                 break;
             }
-            error = st_append(&result, &count, &capacity, &record, cursor + name_offset, include_clones);
+            // Bulk enumeration can describe the covered directory rather than
+            // the mounted filesystem or firmlink reached through this name.
+            // Resolve directory identities before Swift filters devices and
+            // deduplicates traversal, without following symbolic links.
+            struct stat child_metadata;
+            if (record.object_type == VDIR
+                && fstatat(descriptor, cursor + name_offset, &child_metadata, AT_SYMLINK_NOFOLLOW) == 0) {
+                error = st_append_stat(&result, &count, &capacity, cursor + name_offset, &child_metadata);
+            } else {
+                error = st_append(&result, &count, &capacity, &record, cursor + name_offset, include_clones);
+            }
             if (error != 0) break;
             cursor += record.length;
         }

@@ -1,6 +1,28 @@
+import Darwin
 import Foundation
+import SpaceTreeNative
 import Testing
 @testable import SpaceTree
+
+@Test func startupDirectoryEntriesMatchTraversalIdentities() throws {
+    // A shallow read catches startup APFS device translation, firmlinks, and
+    // covered mount points without scanning the user's disk.
+    var entries: UnsafeMutablePointer<st_directory_entry_t>?
+    var count = 0
+    var diagnostics = st_directory_diagnostics_t()
+    let error = st_list_directory_with_diagnostics("/", &entries, &count, &diagnostics)
+    defer { st_free_directory_entries(entries, count) }
+    #expect(error == 0)
+    #expect(diagnostics.fallback_directories == 0)
+    let records = UnsafeBufferPointer(start: try #require(entries), count: count)
+    for name in ["System", "Users", "Applications", "Library", "private", "dev"] {
+        let record = try #require(records.first { String(cString: $0.name) == name })
+        var metadata = stat()
+        #expect(lstat("/" + name, &metadata) == 0)
+        #expect(record.device_id == UInt64(metadata.st_dev), "Device mismatch for /\(name)")
+        #expect(record.file_id == UInt64(metadata.st_ino), "Inode mismatch for /\(name)")
+    }
+}
 
 @Test func scannerCoalescesRepeatedAndNestedRoots() async throws {
     let manager = FileManager.default
