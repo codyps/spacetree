@@ -41,6 +41,8 @@ struct TreemapView: View {
                                 scene.rect(for: id) ?? (hover.details?.nodeID == id ? hover.details?.rect : nil)
                             }
                         }
+                        TreemapHoverTooltip(hover: hover)
+                            .allowsHitTesting(false)
                     }
                     if isPreparing {
                         VStack(spacing: 8) {
@@ -61,7 +63,7 @@ struct TreemapView: View {
                         }
                     }
                 }
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipped()
                 .task(id: LayoutRequest(tree: tree, nodeIDs: nodeIDs, size: geometry.size, displayScale: displayScale)) {
                     await prepareScene(in: bounds)
                 }
@@ -210,6 +212,52 @@ private struct TreemapHoverPath: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: 22)
             .transaction { $0.animation = nil }
+    }
+}
+
+private struct TreemapHoverTooltip: View {
+    let hover: TreemapHoverState
+
+    var body: some View {
+        if let details = hover.details, let location = hover.location {
+            CursorTooltipLayout(cursor: location) {
+                Text(details.label)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 5))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5)
+                            .strokeBorder(.white.opacity(0.25), lineWidth: 1)
+                    }
+            }
+            .transaction { $0.animation = nil }
+        }
+    }
+}
+
+// Measure the wrapped label before placing it, flipping around the cursor near edges.
+private struct CursorTooltipLayout: Layout {
+    let cursor: CGPoint
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let tooltip = subviews.first else { return }
+        let inset: CGFloat = 4
+        let gap: CGFloat = 16
+        let available = ProposedViewSize(width: min(420, max(0, bounds.width - inset * 2)),
+                                         height: max(0, bounds.height - inset * 2))
+        let size = tooltip.sizeThatFits(available)
+        let x = cursor.x + gap + size.width <= bounds.width - inset
+            ? cursor.x + gap : cursor.x - gap - size.width
+        let y = cursor.y + gap + size.height <= bounds.height - inset
+            ? cursor.y + gap : cursor.y - gap - size.height
+        tooltip.place(at: CGPoint(x: bounds.minX + max(inset, min(x, bounds.width - size.width - inset)),
+                                  y: bounds.minY + max(inset, min(y, bounds.height - size.height - inset))),
+                      anchor: .topLeading, proposal: available)
     }
 }
 

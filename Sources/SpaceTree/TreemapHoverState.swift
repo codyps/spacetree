@@ -12,10 +12,12 @@ final class TreemapHoverState {
     }
 
     private(set) var details: Details?
+    private(set) var location: CGPoint?
     @ObservationIgnored private var sceneID: UUID?
 
     // Synchronous: no debounce or queued work can leave the path behind the mouse.
     func update(at point: CGPoint, in scene: TreemapScene) {
+        location = point
         let hit = scene.hit(at: point)
         guard sceneID != scene.id || hit?.entry.nodeID != details?.nodeID || hit?.rect != details?.rect else { return }
         sceneID = scene.id
@@ -32,6 +34,7 @@ final class TreemapHoverState {
     }
 
     func clear() {
+        location = nil
         if details != nil { details = nil }
         sceneID = nil
     }
