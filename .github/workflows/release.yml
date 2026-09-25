@@ -72,6 +72,8 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.tag != ''
     uses: ./.github/workflows/macos.yml
+    secrets:
+      SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
     with:
       ref: ${{ needs.prepare.outputs.sha }}
       release_tag: ${{ needs.prepare.outputs.tag }}
@@ -104,4 +106,7 @@ jobs:
           test -s "$dmg.sha256"
           sha256sum --check "$dmg.sha256"
           gh release upload "$RELEASE_TAG" "$dmg" "$dmg.sha256" --clobber
+          if [[ -f appcast.xml ]]; then
+            gh release upload "$RELEASE_TAG" appcast.xml --clobber
+          fi
           gh release edit "$RELEASE_TAG" --draft=false --latest

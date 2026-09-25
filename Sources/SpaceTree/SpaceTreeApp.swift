@@ -25,12 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct SpaceTreeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+    @StateObject private var updater = AppUpdater()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 960, minHeight: 640)
+                .onAppear { updater.start() }
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
@@ -42,6 +44,10 @@ struct SpaceTreeApp: App {
                     }
                     NSApplication.shared.orderFrontStandardAboutPanel(options: options)
                 }
+            }
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…", action: updater.checkForUpdates)
+                    .disabled(!updater.canCheckForUpdates)
             }
             CommandMenu("Go") {
                 Button("Back") { model.viewingTarget?.goBack() }
@@ -62,6 +68,9 @@ struct SpaceTreeApp: App {
                 Button("Scan All Mounted Items") { model.scanAll() }
                     .keyboardShortcut("a", modifiers: [.command, .shift])
             }
+        }
+        Settings {
+            UpdateSettingsView(updater: updater)
         }
     }
 }

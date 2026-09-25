@@ -8,12 +8,16 @@ let package = Package(
     products: [
         .executable(name: "SpaceTree", targets: ["SpaceTree"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0")
+    ],
     targets: [
         .executableTarget(
             name: "SpaceTree",
-            dependencies: ["SpaceTreeNative"],
+            dependencies: ["SpaceTreeNative", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/SpaceTree",
-            resources: [.process("Resources")]
+            resources: [.process("Resources")],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .target(
             name: "SpaceTreeNative",

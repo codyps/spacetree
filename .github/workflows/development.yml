@@ -18,6 +18,8 @@ jobs:
   build:
     if: github.ref == 'refs/heads/main'
     uses: ./.github/workflows/macos.yml
+    secrets:
+      SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
     with:
       ref: ${{ github.sha }}
       release_tag: ''

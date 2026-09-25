@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+    secrets:
+      SPARKLE_PRIVATE_ED_KEY:
+        required: false
     outputs:
       display_version:
         value: ${{ jobs.package.outputs.display_version }}
@@ -101,7 +104,15 @@ jobs:
         env:
           BUILD_NUMBER: ${{ github.run_number }}
           DISPLAY_VERSION: ${{ steps.version.outputs.display_version }}
-        run: scripts/build-dmg.sh
+          SPARKLE_PUBLIC_ED_KEY: ${{ (inputs.development || inputs.release_tag != '') && vars.SPARKLE_PUBLIC_ED_KEY || '' }}
+          SPARKLE_PRIVATE_ED_KEY: ${{ (inputs.development || inputs.release_tag != '') && secrets.SPARKLE_PRIVATE_ED_KEY || '' }}
+        run: |
+          if [[ -n "$SPARKLE_PUBLIC_ED_KEY" && -z "$SPARKLE_PRIVATE_ED_KEY" ]] ||
+             [[ -z "$SPARKLE_PUBLIC_ED_KEY" && -n "$SPARKLE_PRIVATE_ED_KEY" ]]; then
+            echo 'Configure both Sparkle keys, or neither, for release builds.' >&2
+            exit 1
+          fi
+          scripts/build-dmg.sh
       - name: Upload installer and checksum
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
@@ -109,6 +120,7 @@ jobs:
           path: |
             dist/SpaceTree-*-universal.dmg
             dist/SpaceTree-*-universal.dmg.sha256
+            dist/appcast.xml
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

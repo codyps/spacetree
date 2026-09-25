@@ -7,7 +7,7 @@ SpaceTree is a native macOS disk space analyzer inspired by WizTree. It discover
 
 ## Features
 
-- Native SwiftUI interface with no third-party dependencies
+- Native SwiftUI interface with optional integrated GitHub updates via Sparkle
 - Squarified, proportional treemap grouped by directory; tiny files are aggregated in the overview, with full detail available by opening folders or browsing the file tree
 - Background treemap layout and asynchronous Canvas rendering keep the interface responsive
 - Double-click folder drill-down with breadcrumb navigation
@@ -76,6 +76,24 @@ are required by this workflow; trusted public distribution would need Developer 
 signing and notarization added separately. Generated installers and backup reports
 remain excluded from Git.
 
+### Integrated updates (optional)
+
+Updater-enabled builds offer **SpaceTree → Check for Updates…** and
+**SpaceTree → Settings → Software Updates**. Automatic checks and automatic
+installation are off by default. A manual check lets you download, install, and
+relaunch in the app; opt into scheduled checks or automatic installation in
+Settings. Sparkle verifies the signed feed and the downloaded DMG before
+extracting it. System profiling is disabled.
+
+Stable builds follow the latest stable GitHub release; development builds follow
+only the rolling development release. Running via `swift run`, or packaging
+without an updater public key, leaves the updater inactive and makes no update
+requests. Settings links to GitHub downloads in those builds.
+
+Maintainer setup, signing keys, and local validation are documented in
+[docs/updater.md](docs/updater.md). This does not change the existing ad-hoc
+code-signing/notarization status of the app.
+
 ### Development builds
 
 The rolling [Development release](https://github.com/codyps/spacetree/releases/tag/development)
@@ -102,8 +120,10 @@ DISPLAY_VERSION=$(python3 scripts/build-version.py --development) scripts/build-
 ```
 
 CI uploads the new versioned assets before updating the rolling tag and release
-notes, then removes obsolete DMGs/checksums from that release. Unrelated assets
-are preserved. The prerelease is never marked as the latest stable release, and
+notes, then removes obsolete DMGs/checksums from that release for builds without an
+update feed. Once integrated updates are enabled, versioned assets are retained
+so cached feeds and open update dialogs can still download their selected build.
+Unrelated assets are preserved. The prerelease is never marked as the latest stable release, and
 its notes link to the exact commit and CI run. Failed tests/builds leave the
 previous development release available.
 

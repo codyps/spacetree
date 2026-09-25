@@ -45,6 +45,13 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$work_dir/AppIcon.icon
 lipo -create "${binaries[@]}" -output "$app/Contents/MacOS/SpaceTree"
 chmod 755 "$app/Contents/MacOS/SpaceTree"
 # Bundle.main loads the packaged PNG; SwiftPM's Bundle.module remains the CLI fallback.
+# Preserve Sparkle's framework symlinks, helpers, signatures, and permissions.
+sparkle_root="$build_root/arm64/artifacts/sparkle/Sparkle"
+mkdir -p "$app/Contents/Frameworks"
+ditto "$sparkle_root/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" \
+    "$app/Contents/Frameworks/Sparkle.framework"
+lipo "$app/Contents/Frameworks/Sparkle.framework/Sparkle" -verify_arch arm64 x86_64
+cp "$sparkle_root/LICENSE" "$app/Contents/Resources/Sparkle-LICENSE.txt"
 cp Sources/SpaceTree/Resources/AppIcon.png "$app/Contents/Resources/AppIcon.png"
 for size in 16 32 128 256 512; do
     sips -z "$size" "$size" Sources/SpaceTree/Resources/AppIcon.png \
@@ -73,6 +80,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
+python3 scripts/configure-updater.py "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --deep --strict --verbose=2 "$app"
@@ -100,4 +108,28 @@ cmp Sources/SpaceTree/Resources/AppIcon.png "$work_dir/mounted/SpaceTree.app/Con
 hdiutil detach "$work_dir/mounted"
 mounted=false
 (cd "$output_dir" && shasum -a 256 "$(basename "$dmg")" > "$(basename "$dmg").sha256")
+# Generate a signed feed from only this build, never stale files in dist/.
+# Keep private keys on stdin; they must not appear in process arguments or logs.
+if [[ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]]; then
+    mkdir "$work_dir/feed"
+    cp "$dmg" "$work_dir/feed/"
+    release_tag="v$version"
+    if [[ "$display_version" == *-dev.* ]]; then
+        release_tag=development
+    fi
+    feed_args=(--maximum-deltas 0 --maximum-versions 1
+        --download-url-prefix "https://github.com/${GITHUB_REPOSITORY:-codyps/spacetree}/releases/download/$release_tag/")
+    if [[ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]]; then
+        printf '%s' "$SPARKLE_PRIVATE_ED_KEY" | "$sparkle_root/bin/generate_appcast" \
+            --ed-key-file - "${feed_args[@]}" "$work_dir/feed"
+    else
+        "$sparkle_root/bin/generate_appcast" "${feed_args[@]}" "$work_dir/feed"
+    fi
+    test -s "$work_dir/feed/appcast.xml"
+    swift scripts/verify-update.swift "$app/Contents/Info.plist" "$work_dir/feed/appcast.xml" "$dmg"
+    cp "$work_dir/feed/appcast.xml" "$output_dir/appcast.xml"
+else
+    # A reused output directory must not publish an old signed feed.
+    rm -f "$output_dir/appcast.xml"
+fi
 printf 'Created %s\n' "$dmg"

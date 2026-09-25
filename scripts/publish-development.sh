@@ -52,11 +52,22 @@ if [[ -n "$ref_sha" ]]; then
 else
     gh api --method POST "repos/$GH_REPO/git/refs" -f ref=refs/tags/development -f sha="$BUILD_SHA" >/dev/null
 fi
+# Publish the feed only after the corresponding DMG and checksum are available.
+# Old cached feeds can still reference the previous version during this update.
+if [[ -f appcast.xml ]]; then
+    gh release upload development appcast.xml --clobber
+fi
 gh release edit development --target "$BUILD_SHA" --prerelease --latest=false --draft=false \
     --title "Development build ($DISPLAY_VERSION)" --notes-file "$notes"
 
-# Remove only obsolete assets owned by this workflow, after publication succeeds.
+# Retain old signed development updates: clients can have a cached appcast or an
+# update dialog open while a newer release is published. Deleting their DMGs
+# would break installation. Legacy non-updater builds keep the old cleanup.
 assets=$(gh release view development --json assets --jq '.assets[].name')
+if [[ -f appcast.xml || "$assets" == *appcast.xml* ]]; then
+    exit 0
+fi
+# Remove only obsolete assets owned by this workflow, after publication succeeds.
 while IFS= read -r asset; do
     case "$asset" in
         SpaceTree-*-universal.dmg|SpaceTree-*-universal.dmg.sha256)
