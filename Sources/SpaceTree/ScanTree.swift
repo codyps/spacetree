@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct NodeID: RawRepresentable, Hashable, Codable, Sendable, Comparable {
@@ -748,9 +749,10 @@ struct ScanTreeBuilder {
         }
 
         report("Sorting entries", 0, nodes.count)
+        var sortBuffer: [ChildSortKey] = []
         for rawIndex in nodes.indices {
             report("Sorting entries", rawIndex, nodes.count)
-            sortChildren(of: NodeID(rawValue: UInt32(rawIndex)))
+            sortChildren(of: NodeID(rawValue: UInt32(rawIndex)), using: &sortBuffer)
         }
 
         report("Sorting entries", nodes.count, nodes.count)
@@ -807,28 +809,46 @@ struct ScanTreeBuilder {
         lastChildren[parentIndex] = child
     }
 
-    private mutating func sortChildren(of parent: NodeID) {
+    // Keep comparison keys together instead of repeatedly fetching full node
+    // records from across the tree. Scratch space is reused between directories;
+    // no per-node sort index or decoded filename strings survive finalization.
+    private struct ChildSortKey {
+        let size: UInt64
+        let id: NodeID
+        let nameOffset: UInt32
+        let nameLength: UInt16
+    }
+
+    private mutating func sortChildren(of parent: NodeID, using children: inout [ChildSortKey]) {
         let parentIndex = Int(parent.rawValue)
-        guard nodes[parentIndex].firstChild != .null else { return }
-        var children: [NodeID] = []
         var child = nodes[parentIndex].firstChild
+        guard child != .null, nodes[Int(child.rawValue)].nextSibling != .null else { return }
+        children.removeAll(keepingCapacity: true)
         while child != .null {
-            children.append(child)
-            child = nodes[Int(child.rawValue)].nextSibling
+            let record = nodes[Int(child.rawValue)]
+            children.append(ChildSortKey(size: record.flags.contains(.duplicateReference) ? 0 : record.allocatedBytes,
+                                         id: child, nameOffset: record.nameOffset, nameLength: record.nameLength))
+            child = record.nextSibling
         }
-        children.sort { lhs, rhs in
-            let left = nodes[Int(lhs.rawValue)]
-            let right = nodes[Int(rhs.rawValue)]
-            let leftSize = left.flags.contains(.duplicateReference) ? 0 : left.allocatedBytes
-            let rightSize = right.flags.contains(.duplicateReference) ? 0 : right.allocatedBytes
-            if leftSize != rightSize { return leftSize > rightSize }
-            return nameBytes(of: lhs).lexicographicallyPrecedes(nameBytes(of: rhs))
+        nameBytes.withUnsafeBufferPointer { names in
+            children.sort { left, right in
+                if left.size != right.size { return left.size > right.size }
+                let commonLength = Int(min(left.nameLength, right.nameLength))
+                // Preserve raw UTF-8 ordering, including prefixes and distinct
+                // Unicode encodings. Empty names never dereference the buffer.
+                if commonLength > 0 {
+                    let result = memcmp(names.baseAddress!.advanced(by: Int(left.nameOffset)),
+                                        names.baseAddress!.advanced(by: Int(right.nameOffset)), commonLength)
+                    if result != 0 { return result < 0 }
+                }
+                return left.nameLength < right.nameLength
+            }
         }
-        nodes[parentIndex].firstChild = children[0]
+        nodes[parentIndex].firstChild = children[0].id
         for index in children.indices {
-            nodes[Int(children[index].rawValue)].nextSibling = index + 1 < children.count ? children[index + 1] : .null
+            nodes[Int(children[index].id.rawValue)].nextSibling = index + 1 < children.count ? children[index + 1].id : .null
         }
-        lastChildren[parentIndex] = children.last ?? .null
+        lastChildren[parentIndex] = children.last?.id ?? .null
     }
 
     private func pathComponents(of nodeID: NodeID) -> [[UInt8]] {
