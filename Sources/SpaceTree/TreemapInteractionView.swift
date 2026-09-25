@@ -43,19 +43,28 @@ final class MapInputView: NSView {
         addTrackingArea(area)
         tracking = area
     }
+    // Native input fills the current viewport; scene geometry may still be from
+    // before a live resize. Use the inverse of the visual layer's scale.
+    private func scenePoint(for event: NSEvent) -> CGPoint {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let scene else { return point }
+        return CGPoint(x: scene.bounds.minX + (point.x - bounds.minX) * scene.bounds.width / max(1, bounds.width),
+                       y: scene.bounds.minY + (point.y - bounds.minY) * scene.bounds.height / max(1, bounds.height))
+    }
+
     private func node(at event: NSEvent) -> NodeMetadata? {
-        guard let scene, let hit = scene.hit(at: convert(event.locationInWindow, from: nil)) else { return nil }
+        guard let scene, let hit = scene.hit(at: scenePoint(for: event)) else { return nil }
         guard target?.isTrashed(hit.entry.nodeID) != true else { return nil }
         return scene.tree.metadata(for: hit.entry.nodeID)
     }
-    override func mouseMoved(with event: NSEvent) { onHover?(convert(event.locationInWindow, from: nil)) }
+    override func mouseMoved(with event: NSEvent) { onHover?(scenePoint(for: event)) }
     override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
     override func mouseExited(with event: NSEvent) { onHover?(nil) }
     override func mouseDown(with event: NSEvent) {
         if event.modifierFlags.contains(.control) { rightMouseDown(with: event); return }
         window?.makeFirstResponder(self)
         guard let node = node(at: event), let target else { return }
-        onHover?(convert(event.locationInWindow, from: nil))
+        onHover?(scenePoint(for: event))
         onSelect?(node)
         if event.clickCount == 2 { FileItemActions.shared.open([node], target: target) }
     }
@@ -63,7 +72,7 @@ final class MapInputView: NSView {
         guard let target else { return nil }
         window?.makeFirstResponder(self)
         let node = node(at: event)
-        onHover?(convert(event.locationInWindow, from: nil))
+        onHover?(scenePoint(for: event))
         if let node { onSelect?(node) }
         return FileItemActions.shared.menu(for: node.map { [$0] } ?? [], target: target)
     }

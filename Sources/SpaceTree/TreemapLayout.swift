@@ -151,6 +151,7 @@ struct TreemapScene: Sendable {
     }
     let folders: [Folder]
     var labeledFolders: [Folder] { folders }
+    let bounds: CGRect
     let raster: CGImage?
     let tree: ScanTree
     let entries: [Entry]
@@ -252,7 +253,7 @@ struct TreemapScene: Sendable {
         let raster = try rasterize(entries: entries, tiles: tiles, in: bounds, scale: scale)
         onProgress(BuildProgress(stage: "Finishing tree…"))
         let hitIndex = try TreemapHitIndex(tiles: tiles, bounds: bounds)
-        return TreemapScene(folders: folders, raster: raster, tree: tree, entries: entries, tiles: tiles,
+        return TreemapScene(folders: folders, bounds: bounds, raster: raster, tree: tree, entries: entries, tiles: tiles,
                             labeledTileIndices: tiles.indices.filter {
                                 let rect = tiles[$0].labelRect
                                 return entries[tiles[$0].entryIndex].isAggregate

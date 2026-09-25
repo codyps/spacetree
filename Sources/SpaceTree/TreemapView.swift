@@ -12,9 +12,11 @@ struct TreemapView: View {
     @State private var hover = TreemapHoverState()
     @State private var selectedRect: CGRect?
     @State private var isPreparing = false
+    @State private var isResizing = false
     @State private var activeRequest = UUID()
     @State private var buildOwner = UUID()
     @State private var previousLayoutRequest: LayoutRequest?
+    @State private var displayedLayoutRequest: LayoutRequest?
     @State private var buildProgress = TreemapScene.BuildProgress(stage: "Laying out tree…")
 
     var body: some View {
@@ -25,24 +27,30 @@ struct TreemapView: View {
                     Color.black.opacity(0.28)
 
                     if let scene {
-                        TreemapBaseLayer(scene: scene, bounds: bounds)
-                            .equatable()
-                        TreemapDeletionOverlay(scene: scene, target: target)
-                            .allowsHitTesting(false)
-                        TreemapHoverOverlay(hover: hover, selectedRect: selectedRect)
-                            .allowsHitTesting(false)
+                        // Draw every visual layer in the completed layout's coordinates,
+                        // then stretch the entire composition until its replacement is ready.
+                        ZStack {
+                            TreemapBaseLayer(scene: scene, bounds: scene.bounds)
+                                .equatable()
+                            TreemapDeletionOverlay(scene: scene, target: target)
+                            TreemapHoverOverlay(hover: hover, selectedRect: selectedRect)
+                            TreemapHoverTooltip(hover: hover)
+                        }
+                        .frame(width: scene.bounds.width, height: scene.bounds.height)
+                        .scaleEffect(x: bounds.width / max(1, scene.bounds.width),
+                                     y: bounds.height / max(1, scene.bounds.height), anchor: .topLeading)
+                        .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
+                        .allowsHitTesting(false)
                         TreemapInteractionView(scene: scene, target: target, onSelect: onSelect) { location in
                             if let location { hover.update(at: location, in: scene) }
                             else { hover.clear() }
                         }
-                        .allowsHitTesting(!isPreparing)
+                        .allowsHitTesting(!isPreparing || isResizing)
                         .onChange(of: selectedID) { _, newValue in
                             selectedRect = newValue.flatMap { id in
                                 scene.rect(for: id) ?? (hover.details?.nodeID == id ? hover.details?.rect : nil)
                             }
                         }
-                        TreemapHoverTooltip(hover: hover)
-                            .allowsHitTesting(false)
                     }
                     if isPreparing {
                         VStack(spacing: 8) {
@@ -84,8 +92,12 @@ struct TreemapView: View {
         activeRequest = requestID
         buildProgress = TreemapScene.BuildProgress(stage: "Laying out tree…", total: 0)
         isPreparing = true
-        hover.clear()
-        selectedRect = nil
+        let preservesScene = layoutRequest.isResize(of: displayedLayoutRequest)
+        isResizing = preservesScene
+        if !preservesScene {
+            hover.clear()
+            selectedRect = nil
+        }
         let inputTree = tree, inputNodes = nodeIDs, scale = displayScale
         let (updates, continuation) = AsyncStream<TreemapScene.BuildProgress>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let request = Task {
@@ -106,7 +118,15 @@ struct TreemapView: View {
                 let prepared = try await request.value
                 try Task.checkCancellation()
                 guard activeRequest == requestID else { return }
+                let previousScene = scene
                 scene = prepared
+                displayedLayoutRequest = layoutRequest
+                if preservesScene, let location = hover.location, let previousScene {
+                    let resizedLocation = CGPoint(
+                        x: location.x * bounds.width / max(1, previousScene.bounds.width),
+                        y: location.y * bounds.height / max(1, previousScene.bounds.height))
+                    hover.update(at: resizedLocation, in: prepared)
+                }
                 selectedRect = selectedID.flatMap { prepared.rect(for: $0) }
                 isPreparing = false
             } catch {
