@@ -241,9 +241,17 @@ private struct TreemapHoverTooltip: View {
     var body: some View {
         if let details = hover.details, let location = hover.location {
             CursorTooltipLayout(cursor: location) {
-                Text(details.label)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(details.path)
+                        .truncationMode(.middle)
+                    Text(details.sizeLabel + details.aggregateLabel)
+                        .truncationMode(.tail)
+                }
+                    .lineLimit(1)
                     .font(.caption)
                     .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(8)
                     .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 5))
                     .overlay {
@@ -256,7 +264,8 @@ private struct TreemapHoverTooltip: View {
     }
 }
 
-// Measure the wrapped label before placing it, flipping around the cursor near edges.
+// A fixed-width, two-row footprint keeps placement independent of the hovered text.
+// Only cursor movement or changed map bounds can change which side it appears on.
 private struct CursorTooltipLayout: Layout {
     let cursor: CGPoint
 
@@ -269,7 +278,7 @@ private struct CursorTooltipLayout: Layout {
         let inset: CGFloat = 4
         let gap: CGFloat = 16
         let available = ProposedViewSize(width: min(420, max(0, bounds.width - inset * 2)),
-                                         height: max(0, bounds.height - inset * 2))
+                                         height: nil)
         let size = tooltip.sizeThatFits(available)
         let x = cursor.x + gap + size.width <= bounds.width - inset
             ? cursor.x + gap : cursor.x - gap - size.width

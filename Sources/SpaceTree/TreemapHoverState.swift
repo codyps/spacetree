@@ -7,7 +7,10 @@ final class TreemapHoverState {
     struct Details {
         let nodeID: NodeID
         let rect: CGRect
-        let label: String
+        let path: String
+        let sizeLabel: String
+        let aggregateLabel: String
+        var label: String { "\(path) · \(sizeLabel)\(aggregateLabel)" }
         let highlightRects: [CGRect]
     }
 
@@ -28,7 +31,9 @@ final class TreemapHoverState {
         details = Details(
             nodeID: hit.entry.nodeID,
             rect: hit.rect,
-            label: "\(scene.tree.displayPath(of: hit.entry.nodeID)) · \(hit.entry.allocatedBytes.formattedByteCount)" + (hit.entry.isAggregate ? " · \(hit.entry.representedFileCount.formatted()) grouped files — open folder or browse the file tree" : ""),
+            path: scene.tree.displayPath(of: hit.entry.nodeID),
+            sizeLabel: hit.entry.allocatedBytes.formattedByteCount,
+            aggregateLabel: hit.entry.isAggregate ? " · \(hit.entry.representedFileCount.formatted()) grouped files — open folder or browse the file tree" : "",
             highlightRects: scene.tree.breadcrumbs(to: hit.entry.nodeID).compactMap { scene.rect(for: $0) } + [hit.rect]
         )
     }
