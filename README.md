@@ -30,15 +30,18 @@ SpaceTree is a native macOS disk space analyzer inspired by WizTree. It discover
 You need macOS 14 or newer and Xcode 16 or newer.
 
 ```sh
-swift run SpaceTree
+swift run -c release SpaceTree
 ```
 
-For an optimized build:
+Use release mode for real scans: debug builds make sorting millions of entries
+substantially slower. To build first and launch separately:
 
 ```sh
 swift build -c release
 .build/release/SpaceTree
 ```
+
+For debugging with an unoptimized build, use `swift run SpaceTree`.
 
 ## Download or build a DMG
 
