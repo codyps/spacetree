@@ -46,12 +46,6 @@ jobs:
       matrix:
         runner: [macos-26, macos-26-intel]
     runs-on: ${{ matrix.runner }}
-    # TODO(temporary, 2026-09-26): GitHub's macos-26-intel fleet kills the
-    # swift-testing helper with an unreported signal on every commit,
-    # including unchanged historical code, under Xcode 26.5 and 26.6 alike.
-    # The job still runs and its logs stay visible; remove this line once
-    # the runner image is fixed and intel is green again.
-    continue-on-error: ${{ matrix.runner == 'macos-26-intel' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -67,19 +61,7 @@ jobs:
           xcodebuild -version
           swift --version
       - name: Test Swift app
-        # GitHub's macOS runner fleet intermittently kills the swift-testing
-        # helper with an unreported SIGILL/SIGTRAP; confirmed on 2026-09-25
-        # against unchanged, historically green commits. Genuine test
-        # failures reproduce on every attempt, so retry to ride out faults.
-        run: |
-          status=0
-          for attempt in 1 2 3; do
-            swift test --configuration release && exit 0
-            status=$?
-            echo "Swift tests failed on attempt $attempt (exit $status); retrying."
-            sleep 10
-          done
-          exit $status
+        run: swift test --configuration release
       - name: Test backup report tool
         run: python3 -m unittest discover -s scripts/time-machine -p 'test_*.py'
       - name: Test release version checks

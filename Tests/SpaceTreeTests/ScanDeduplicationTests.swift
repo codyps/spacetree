@@ -18,9 +18,20 @@ import Testing
     for name in ["System", "Users", "Applications", "Library", "private", "dev"] {
         let record = try #require(records.first { String(cString: $0.name) == name })
         var metadata = stat()
-        #expect(lstat("/" + name, &metadata) == 0)
-        #expect(record.device_id == UInt64(metadata.st_dev), "Device mismatch for /\(name)")
+        try #require(lstat("/" + name, &metadata) == 0)
+        #expect(record.device_id == DiskScanner.deviceID(from: metadata.st_dev), "Device mismatch for /\(name)")
         #expect(record.file_id == UInt64(metadata.st_ino), "Inode mismatch for /\(name)")
+    }
+}
+
+@Test func signedDeviceIDsMatchNativeRepresentation() {
+    let cases: [(dev_t, UInt64)] = [
+        (0, 0), (1, 1), (.max, 0x7fff_ffff),
+        (-1, .max), (.min, 0xffff_ffff_8000_0000),
+        (-1_677_000_350, 0xffff_ffff_9c0b_0162)
+    ]
+    for (device, expected) in cases {
+        #expect(DiskScanner.deviceID(from: device) == expected)
     }
 }
 
