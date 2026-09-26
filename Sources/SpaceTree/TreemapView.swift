@@ -220,7 +220,7 @@ private struct TreemapHoverPath: View {
     let target: ScanTarget
 
     var body: some View {
-        let label = hover.details?.label ?? "Hover for details · click to reveal in the file tree"
+        let label = hover.details?.label ?? ""
         let cloneLabel = hover.details.flatMap { target.tree?.clones[$0.nodeID]?.label }
         let sharing = cloneLabel.map { " · " + $0 } ?? ""
         let trashed = hover.details.map { target.isTrashed($0.nodeID) } == true ? " · Trashed" : ""

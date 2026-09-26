@@ -570,7 +570,6 @@ private struct LegendView: View {
                 }
             }
             Spacer()
-            Text("Hover for individual files · open folders for detail").foregroundStyle(.tertiary)
         }
         .font(.caption2)
     }
