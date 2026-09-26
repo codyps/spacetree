@@ -61,7 +61,10 @@ jobs:
           xcodebuild -version
           swift --version
       - name: Test Swift app
-        run: swift test --configuration release
+        # Parallel swift-testing crashes the runner's test process without a
+        # report when the updater tests run concurrently with the scanner
+        # suites; serial execution keeps CI deterministic and costs seconds.
+        run: swift test --configuration release --no-parallel
       - name: Test backup report tool
         run: python3 -m unittest discover -s scripts/time-machine -p 'test_*.py'
       - name: Test release version checks
