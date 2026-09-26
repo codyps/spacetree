@@ -46,6 +46,12 @@ jobs:
       matrix:
         runner: [macos-26, macos-26-intel]
     runs-on: ${{ matrix.runner }}
+    # TODO(temporary, 2026-09-26): GitHub's macos-26-intel fleet kills the
+    # swift-testing helper with an unreported signal on every commit,
+    # including unchanged historical code, under Xcode 26.5 and 26.6 alike.
+    # The job still runs and its logs stay visible; remove this line once
+    # the runner image is fixed and intel is green again.
+    continue-on-error: ${{ matrix.runner == 'macos-26-intel' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
