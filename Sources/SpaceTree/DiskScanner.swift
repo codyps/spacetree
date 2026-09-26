@@ -375,6 +375,12 @@ enum DiskScanner {
         return results
     }
 
+    // Darwin dev_t is signed, but device IDs are opaque bit patterns. Match
+    // the native scanner's (uint64_t)dev_t cast, including sign extension.
+    static func deviceID(from device: dev_t) -> UInt64 {
+        UInt64(bitPattern: Int64(device))
+    }
+
     private static func rootMetadata(at url: URL) throws -> (device: UInt64, inode: UInt64) {
         // No suspension while the thread policy is overridden, including path lookup.
         let previous = getiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD)
@@ -395,7 +401,7 @@ enum DiskScanner {
         if (metadata.st_mode & S_IFMT) == S_IFLNK { throw DiskScannerError.rootIsSymbolicLink(url) }
         guard (metadata.st_mode & S_IFMT) == S_IFDIR else { throw DiskScannerError.rootIsNotDirectory(url) }
         if metadata.st_flags & UInt32(SF_DATALESS) != 0 { throw DiskScannerError.rootIsDataless(url) }
-        return (UInt64(metadata.st_dev), UInt64(metadata.st_ino))
+        return (deviceID(from: metadata.st_dev), UInt64(metadata.st_ino))
     }
 
     private static func finalize(

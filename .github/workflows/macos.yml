@@ -62,14 +62,10 @@ jobs:
           swift --version
       - name: Test Swift app
         run: |
-          swift test --configuration release --filter __diagnostic_build_only__
-          bin_path=$(swift build --configuration release --show-bin-path)
-          helper="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper"
-          bundle="$bin_path/SpaceTreePackageTests.xctest/Contents/MacOS/SpaceTreePackageTests"
-          clang -dynamiclib scripts/ci-crash-trace.c -o /tmp/ci-crash-trace.dylib
-          for attempt in {1..10}; do
-            echo "Ordinary test run $attempt"
-            DYLD_INSERT_LIBRARIES=/tmp/ci-crash-trace.dylib swift test --skip-build --configuration release
+          swift test --configuration release
+          for attempt in {1..9}; do
+            echo "Verification run $attempt"
+            swift test --skip-build --configuration release
           done
       - name: Test backup report tool
         run: python3 -m unittest discover -s scripts/time-machine -p 'test_*.py'
