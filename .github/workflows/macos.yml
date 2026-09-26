@@ -66,14 +66,10 @@ jobs:
           bin_path=$(swift build --configuration release --show-bin-path)
           helper="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper"
           bundle="$bin_path/SpaceTreePackageTests.xctest/Contents/MacOS/SpaceTreePackageTests"
-          for attempt in {1..5}; do
-            echo "Debugger run $attempt"
-            lldb --batch -o "settings set target.env-vars DYLD_FRAMEWORK_PATH=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/Library/Frameworks DYLD_LIBRARY_PATH=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/usr/lib" -o run -k 'thread backtrace all' -- "$helper" --test-bundle-path "$bundle" --configuration release "$bundle" --testing-library swift-testing | tee /tmp/test-debugger.log
-            if grep -q 'stop reason' /tmp/test-debugger.log; then exit 1; fi
-          done
+          clang -dynamiclib scripts/ci-crash-trace.c -o /tmp/ci-crash-trace.dylib
           for attempt in {1..10}; do
             echo "Ordinary test run $attempt"
-            swift test --skip-build --configuration release
+            DYLD_INSERT_LIBRARIES=/tmp/ci-crash-trace.dylib swift test --skip-build --configuration release
           done
       - name: Test backup report tool
         run: python3 -m unittest discover -s scripts/time-machine -p 'test_*.py'
