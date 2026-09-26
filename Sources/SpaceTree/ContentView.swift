@@ -6,24 +6,27 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let target = model.viewingTarget {
-                ExplorerToolbar(target: target)
-                Divider()
                 ExplorerView(target: target)
             } else {
-                DashboardToolbar()
-                Divider()
                 DashboardView()
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .toolbar {
+            if let target = model.viewingTarget {
+                ExplorerToolbar(target: target)
+            } else {
+                DashboardToolbar()
+            }
+        }
     }
 }
 
-private struct DashboardToolbar: View {
+private struct DashboardToolbar: ToolbarContent {
     @Environment(AppModel.self) private var model
 
-    var body: some View {
-        HStack(spacing: 10) {
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
             HStack(spacing: 6) {
                 Image(systemName: "square.grid.3x3.fill")
                     .foregroundStyle(.blue)
@@ -35,9 +38,9 @@ private struct DashboardToolbar: View {
                     .foregroundStyle(.secondary)
             }
             .fixedSize()
+        }
 
-            Divider().frame(height: 18)
-
+        ToolbarItemGroup(placement: .automatic) {
             Button(action: model.chooseFolder) {
                 Label("Add Folder", systemImage: "folder.badge.plus")
             }
@@ -53,8 +56,6 @@ private struct DashboardToolbar: View {
 
             volumeFilters
 
-            Spacer(minLength: 8)
-
             if model.scanningCount > 0 {
                 Text("\(model.scanningCount) scanning")
                     .foregroundStyle(.secondary)
@@ -67,10 +68,6 @@ private struct DashboardToolbar: View {
             }
             .disabled(model.visibleTargets.isEmpty)
         }
-        .controlSize(.small)
-        .frame(height: 42)
-        .padding(.horizontal, 12)
-        .background(.regularMaterial)
     }
 
     @ViewBuilder
@@ -400,12 +397,12 @@ private struct ExplorerView: View {
     }
 }
 
-private struct ExplorerToolbar: View {
+private struct ExplorerToolbar: ToolbarContent {
     @Environment(AppModel.self) private var model
     @Bindable var target: ScanTarget
 
-    var body: some View {
-        HStack(spacing: 8) {
+    var body: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
             Button(action: model.showDashboard) {
                 Label("All scans", systemImage: "square.grid.2x2")
             }
@@ -434,11 +431,14 @@ private struct ExplorerToolbar: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .fixedSize()
+        }
 
-            Divider().frame(height: 20)
+        ToolbarItem(placement: .principal) {
             breadcrumbs
-                .frame(minWidth: 100, maxWidth: .infinity)
+                .frame(minWidth: 100, idealWidth: 240, maxWidth: 360)
+        }
 
+        ToolbarItemGroup(placement: .status) {
             if target.state == .scanning {
                 ProgressView().controlSize(.small)
             } else if target.hasFilesystemChanges {
@@ -455,9 +455,11 @@ private struct ExplorerToolbar: View {
                     .disabled(target.state == .scanning)
             }
 
-            ScanInfoBar(target: target)
+            CompactScanInfo(target: target)
                 .fixedSize()
+        }
 
+        ToolbarItemGroup(placement: .primaryAction) {
             TextField("Filter this folder", text: $target.searchText)
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 150)
@@ -468,10 +470,6 @@ private struct ExplorerToolbar: View {
             .help("Reveal selected item in Finder")
             .disabled(target.selected == nil)
         }
-        .controlSize(.small)
-        .padding(.horizontal, 12)
-        .frame(height: 42)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     private var breadcrumbs: some View {
@@ -495,6 +493,37 @@ private struct ExplorerToolbar: View {
                 }
             }
             .padding(.horizontal, 12)
+        }
+    }
+}
+
+private struct CompactScanInfo: View {
+    let target: ScanTarget
+    @State private var showsDetails = false
+
+    var body: some View {
+        if let current = target.current {
+            HStack(spacing: 6) {
+                Text(current.allocatedBytes.formattedByteCount)
+                    .fontWeight(.semibold)
+                Text("\(current.fileCount.formatted(.number.notation(.compactName))) files")
+                    .foregroundStyle(.secondary)
+                Button {
+                    showsDetails.toggle()
+                } label: {
+                    Image(systemName: target.progress.unreadableCount > 0
+                          ? "exclamationmark.circle" : "info.circle")
+                        .foregroundStyle(target.progress.unreadableCount > 0 ? Color.orange : Color.secondary)
+                }
+                .help("Scan details")
+                .accessibilityLabel("Scan details")
+                .popover(isPresented: $showsDetails) {
+                    ScanInfoBar(target: target)
+                        .padding()
+                }
+            }
+            .font(.caption)
+            .monospacedDigit()
         }
     }
 }
