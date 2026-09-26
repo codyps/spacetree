@@ -62,7 +62,7 @@ jobs:
           swift --version
       - name: Test Swift app
         run: |
-          swift build --build-tests --enable-testable-imports --configuration release
+          swift test --configuration release --filter __diagnostic_build_only__
           bin_path=$(swift build --configuration release --show-bin-path)
           helper="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper"
           bundle="$bin_path/SpaceTreePackageTests.xctest/Contents/MacOS/SpaceTreePackageTests"
