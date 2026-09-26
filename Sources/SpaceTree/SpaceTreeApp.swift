@@ -35,6 +35,7 @@ struct SpaceTreeApp: App {
                 .onAppear { updater.start() }
         }
         .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About SpaceTree") {
