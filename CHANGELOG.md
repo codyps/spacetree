@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/codyps/spacetree/compare/v0.2.0...v0.3.0) (2026-09-26)
+
+
+### Features
+
+* move scan controls into compact window title bar ([55881be](https://github.com/codyps/spacetree/commit/55881be8af7a48c76f6115a2888f7bf5b5725cda))
+* move scan controls into compact window title bar ([e47d903](https://github.com/codyps/spacetree/commit/e47d903afc397b4a806ef5cbf083af185f8a26ae))
+
+
+### Bug Fixes
+
+* remove treemap instructional hints ([#4](https://github.com/codyps/spacetree/issues/4)) ([c1f5b56](https://github.com/codyps/spacetree/commit/c1f5b56a8d73ef3b3996910c86e7743afd165083))
+
 ## [0.2.0](https://github.com/codyps/spacetree/compare/v0.1.0...v0.2.0) (2026-09-26)
 
 
