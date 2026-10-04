@@ -12,6 +12,7 @@ SpaceTree is a native macOS disk space analyzer inspired by WizTree. It discover
 - Background treemap layout and asynchronous Canvas rendering keep the interface responsive
 - Double-click folder drill-down with breadcrumb navigation
 - File/folder detail list, search, and Finder reveal
+- Native Time Machine change treemap across a selectable range of mounted APFS backups, with per-path history and cached comparisons
 - Allocated and logical byte accounting
 - Hard-link and repeat-traversal deduplication using filesystem device/inode identity
 - Live item, byte, path, and unreadable-file progress
@@ -42,6 +43,62 @@ swift build -c release
 ```
 
 For debugging with an unoptimized build, use `swift run SpaceTree`.
+
+## Time Machine changes
+
+Choose **Backup Changes** on the dashboard, choose a destination and the first
+and last snapshots, then **Analyze Range**. SpaceTree compares every adjacent
+pair of mounted snapshots within that range. Completed intervals appear as they
+finish and are cached locally; Stop retains completed results and Analyze Range
+reuses them. Progress distinguishes scanning (elapsed time and actual comparison
+output bytes), parsing, inspecting change records, and saving the cache. `tmutil`
+does not expose a reliable scan percentage. The grid shows nested child folders
+and files immediately, using the same hierarchical renderer as the disk-space
+view; tiny files share proportional grouped regions. Double-click folder headers
+or files (or use the list arrows) to drill down,
+search paths, and select a contributor to see its per-interval history.
+
+The destination picker lists local disks first and selects one by default. Network
+backups show their server/share location and a **Network (slower)** indicator.
+Refreshing preserves the selected destination while it remains available. If an
+image’s backing location cannot be resolved, its connection is labeled unknown.
+
+**Box area** offers three measures:
+
+- **Changed file sizes** sums each added or modified file's newer size in every
+  interval. A repeatedly rewritten 1 GB database contributes 1 GB per interval,
+  even if it never grows. This is useful for finding recurring churn.
+- **Cumulative size delta** (default) sums absolute size differences per interval, including
+  additions and removals. Growth and shrinkage accumulate rather than cancelling;
+  same-size rewrites contribute zero.
+- **Removed sizes** sums deleted items' earlier sizes. Deletion does not mean
+  historical storage has been reclaimed.
+
+These are logical-byte indicators, **not exact transfer bytes or unique APFS
+storage**. Comparisons inspect size and modification time, not file contents,
+ACLs, or extended attributes. Added/removed directories can be reported as subtree
+summaries rather than individual files; those are labeled and counted once.
+Coverage shows failed intervals, inspection warnings, and limitations. A successful
+command does not prove every protected file was accessible. Gaps between mounted
+snapshots may span multiple backup runs; changes between uninspected snapshots
+cannot be recovered from endpoint comparisons.
+
+Connect a backup disk (or mount a network backup's APFS volume) first. If its
+completed snapshots are not mounted, use a terminal with Full Disk Access:
+
+```sh
+tmutil listbackups -d "/Volumes/Your Backup Volume" -m
+```
+
+Refresh Snapshots afterward. SpaceTree may also need Full Disk Access under
+System Settings → Privacy & Security. This mode discovers completed read-only
+APFS backup mounts and groups them by destination device; local recovery snapshots
+and legacy HFS+ backups are not included. It never changes backup exclusions or
+modifies backup files. Review a source application's cache/database settings or
+Time Machine exclusions separately after identifying recurring contributors.
+
+Comparison caches contain backup-relative filenames and sizes under
+`~/Library/Caches/SpaceTree/BackupChanges/`. No file contents are cached.
 
 ## Download or build a DMG
 

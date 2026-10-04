@@ -162,7 +162,7 @@ struct LayoutRequest: Equatable {
 }
 
 // Keep the expensive drawing independent of selection and pointer state.
-private struct TreemapBaseLayer: View, Equatable {
+struct TreemapBaseLayer: View, Equatable {
     let scene: TreemapScene
     let bounds: CGRect
 
