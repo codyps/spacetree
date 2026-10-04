@@ -2,10 +2,13 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @State private var showingBackupChanges = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if let target = model.viewingTarget {
+            if showingBackupChanges {
+                BackupChangesView { showingBackupChanges = false }
+            } else if let target = model.viewingTarget {
                 ExplorerView(target: target)
             } else {
                 DashboardView()
@@ -13,10 +16,12 @@ struct ContentView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
-            if let target = model.viewingTarget {
-                ExplorerToolbar(target: target)
-            } else {
-                DashboardToolbar()
+            if !showingBackupChanges {
+                if let target = model.viewingTarget {
+                    ExplorerToolbar(target: target)
+                } else {
+                    DashboardToolbar(showBackupChanges: { showingBackupChanges = true })
+                }
             }
         }
     }
@@ -24,6 +29,7 @@ struct ContentView: View {
 
 private struct DashboardToolbar: ToolbarContent {
     @Environment(AppModel.self) private var model
+    var showBackupChanges: () -> Void
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
@@ -55,6 +61,10 @@ private struct DashboardToolbar: ToolbarContent {
             }
 
             volumeFilters
+
+            Button(action: showBackupChanges) {
+                Label("Backup Changes", systemImage: "clock.arrow.circlepath")
+            }
 
             if model.scanningCount > 0 {
                 Text("\(model.scanningCount) scanning")
