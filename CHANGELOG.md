@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/codyps/spacetree/compare/v0.3.0...v0.4.0) (2026-10-04)
+
+
+### Features
+
+* add native Time Machine backup drift analysis ([#6](https://github.com/codyps/spacetree/issues/6)) ([2d129f8](https://github.com/codyps/spacetree/commit/2d129f885f2f16bb5cc2d6c1e612980293fdcb60))
+
 ## [0.3.0](https://github.com/codyps/spacetree/compare/v0.2.0...v0.3.0) (2026-09-26)
 
 
